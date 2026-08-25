@@ -58,13 +58,14 @@ func capabilityEffective(data [2]unix.CapUserData, capability int) bool {
 
 // ParentOptions configures the hidden supervisor process.
 type ParentOptions struct {
-	Executable  string
-	Command     []string
-	Environment []string
-	Directory   string
-	HTTPSocket  string
-	SOCKSocket  string
-	Mode        Mode
+	Executable          string
+	Command             []string
+	Environment         []string
+	Directory           string
+	HTTPSocket          string
+	SOCKSocket          string
+	Mode                Mode
+	RestrictUnixSockets bool
 }
 
 // Run starts the hidden supervisor in fresh user and network namespaces.
@@ -80,6 +81,10 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 
 	if options.Mode == PermissionPreservingMode {
 		arguments = append(arguments, "--"+cli.SupervisorPreservePermissionsOption)
+	}
+
+	if options.RestrictUnixSockets {
+		arguments = append(arguments, "--"+cli.SupervisorRestrictSocketsOption)
 	}
 
 	arguments = append(arguments, "--")
@@ -144,6 +149,7 @@ type SupervisorOptions struct {
 	HTTPSocket          string
 	SOCKSocket          string
 	PreservePermissions bool
+	RestrictUnixSockets bool
 }
 
 // RunSupervisor configures loopback, starts bridges, and supervises the command.
@@ -232,7 +238,19 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 	group.Go(func() error {
 		defer cancel()
 
-		childExitCode, childErr = runSupervisor(groupCtx, options.Command, runOptions{
+		command := options.Command
+		if options.RestrictUnixSockets {
+			executable, executableErr := os.Executable()
+			if executableErr != nil {
+				childErr = fmt.Errorf("locate airjail executable for restricted child: %w", executableErr)
+
+				return nil
+			}
+
+			command = append([]string{executable, cli.RestrictedExecCommand, "--"}, command...)
+		}
+
+		childExitCode, childErr = runSupervisor(groupCtx, command, runOptions{
 			Environment:      options.Environment,
 			Directory:        options.Directory,
 			ReapProcessGroup: true,

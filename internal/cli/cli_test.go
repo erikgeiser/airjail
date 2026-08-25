@@ -51,6 +51,7 @@ allow: [config.example]
 block: [blocked.example]
 log: debug
 allow_unresolved_rules: true
+restrict_unix_sockets: true
 `)
 
 	err := os.WriteFile(configPath, contents, 0o600)
@@ -64,6 +65,7 @@ allow_unresolved_rules: true
 		"--block", "cli-blocked.example",
 		"--log", "info",
 		"--allow-unresolved-rules=false",
+		"--restrict-sockets=false",
 		"command",
 	})
 	if err != nil {
@@ -85,6 +87,10 @@ allow_unresolved_rules: true
 	if invocation.Config.AllowUnresolvedRules {
 		t.Error("AllowUnresolvedRules = true, want CLI override false")
 	}
+
+	if invocation.Config.RestrictUnixSockets {
+		t.Error("RestrictUnixSockets = true, want CLI override false")
+	}
 }
 
 func TestParseHelp(t *testing.T) {
@@ -103,7 +109,7 @@ func TestParseHelp(t *testing.T) {
 	WriteHelp(&output)
 
 	help := output.String()
-	for _, expected := range []string{"Usage: airjail", "--allow", "--config", "--verbose"} {
+	for _, expected := range []string{"Usage: airjail", "--allow", "--config", "--log", "--restrict-sockets"} {
 		if !strings.Contains(help, expected) {
 			t.Errorf("help does not contain %q: %s", expected, help)
 		}

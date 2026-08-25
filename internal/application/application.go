@@ -76,11 +76,12 @@ func Run(ctx context.Context, args []string) (int, error) {
 		logger.Log(logging.Info, "empty policy: starting child in loopback-only namespace without proxies")
 
 		return namespace.Run(ctx, namespace.ParentOptions{
-			Executable:  executable,
-			Command:     invocation.Command,
-			Environment: environment,
-			Directory:   workingDirectory,
-			Mode:        namespaceMode,
+			Executable:          executable,
+			Command:             invocation.Command,
+			Environment:         environment,
+			Directory:           workingDirectory,
+			Mode:                namespaceMode,
+			RestrictUnixSockets: invocation.Config.RestrictUnixSockets,
 		})
 	}
 
@@ -92,6 +93,7 @@ func Run(ctx context.Context, args []string) (int, error) {
 		invocation.Command,
 		networkPolicy,
 		namespaceMode,
+		invocation.Config.RestrictUnixSockets,
 		logger,
 	)
 }
@@ -104,6 +106,7 @@ func runWithProxies(
 	command []string,
 	networkPolicy *policy.Policy,
 	namespaceMode namespace.Mode,
+	restrictUnixSockets bool,
 	logger *logging.Logger,
 ) (int, error) {
 	runtimeSession, err := session.Create(os.Getuid(), os.Getenv("XDG_RUNTIME_DIR"))
@@ -190,13 +193,14 @@ func runWithProxies(
 
 	go func() {
 		exitCode, runErr := namespace.Run(ctx, namespace.ParentOptions{
-			Executable:  executable,
-			Command:     command,
-			Environment: environment,
-			Directory:   workingDirectory,
-			HTTPSocket:  runtimeSession.HTTPSocket,
-			SOCKSocket:  runtimeSession.SOCKSocket,
-			Mode:        namespaceMode,
+			Executable:          executable,
+			Command:             command,
+			Environment:         environment,
+			Directory:           workingDirectory,
+			HTTPSocket:          runtimeSession.HTTPSocket,
+			SOCKSocket:          runtimeSession.SOCKSocket,
+			Mode:                namespaceMode,
+			RestrictUnixSockets: restrictUnixSockets,
 		})
 		commandResults <- commandResult{exitCode: exitCode, err: runErr}
 	}()

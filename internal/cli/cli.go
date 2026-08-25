@@ -12,9 +12,11 @@ import (
 
 const (
 	SupervisorCommand                   = "__netns-supervisor"
+	RestrictedExecCommand               = "__restricted-exec"
 	SupervisorHTTPSocketOption          = "http-socket"
 	SupervisorSOCKSSocketOption         = "socks-socket"
 	SupervisorPreservePermissionsOption = "preserve-permissions"
+	SupervisorRestrictSocketsOption     = "restrict-unix-sockets"
 	SupervisorLogLevel                  = "log-level"
 )
 

@@ -14,8 +14,9 @@ allow:
   - example.com
 block:
   - "*.blocked.example:443"
-verbose: debug
+log: debug
 allow_unresolved_rules: true
+restrict_unix_sockets: true
 `)
 
 	loaded, err := Load(path)
@@ -37,6 +38,10 @@ allow_unresolved_rules: true
 
 	if !loaded.AllowUnresolvedRules {
 		t.Error("AllowUnresolvedRules = false, want true")
+	}
+
+	if !loaded.RestrictUnixSockets {
+		t.Error("RestrictUnixSockets = false, want true")
 	}
 }
 

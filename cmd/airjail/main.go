@@ -26,8 +26,13 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) (int, error) {
-	if len(args) > 0 && args[0] == cli.SupervisorCommand {
-		return runSupervisor(ctx, args[1:])
+	if len(args) > 0 {
+		switch args[0] {
+		case cli.SupervisorCommand:
+			return runSupervisor(ctx, args[1:])
+		case cli.RestrictedExecCommand:
+			return 0, namespace.ExecRestricted(args[1:])
+		}
 	}
 
 	return application.Run(ctx, args)
@@ -42,6 +47,7 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		httpSocket          string
 		socksSocket         string
 		preservePermissions bool
+		restrictUnixSockets bool
 	)
 
 	flags.StringVar(&httpSocket, cli.SupervisorHTTPSocketOption, "", "outer HTTP proxy socket")
@@ -51,6 +57,12 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		cli.SupervisorPreservePermissionsOption,
 		false,
 		"preserve caller permissions",
+	)
+	flags.BoolVar(
+		&restrictUnixSockets,
+		cli.SupervisorRestrictSocketsOption,
+		false,
+		"restrict child Unix sockets",
 	)
 
 	err := flags.Parse(args)
@@ -75,5 +87,6 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		HTTPSocket:          httpSocket,
 		SOCKSocket:          socksSocket,
 		PreservePermissions: preservePermissions,
+		RestrictUnixSockets: restrictUnixSockets,
 	})
 }

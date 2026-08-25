@@ -16,7 +16,7 @@ type Config struct {
 	Allow               []string `yaml:"allow"`
 	Block               []string `yaml:"block"`
 	Log                 string   `yaml:"log"`
-	RestrictUnixSockets bool     `yaml:"restrict_unix_sockets"`
+	RestrictUnixSockets bool     `yaml:"restrict_unix_sockets"` //nolint:tagliatelle
 	// The public YAML schema deliberately uses snake_case.
 	AllowUnresolvedRules bool `yaml:"allow_unresolved_rules"` //nolint:tagliatelle
 }
