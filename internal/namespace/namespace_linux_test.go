@@ -26,6 +26,61 @@ func TestCapabilityEffective(t *testing.T) {
 	}
 }
 
+func TestShouldManageForeground(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                   string
+		terminal               bool
+		joinParentProcessGroup bool
+		foregroundProcessGroup int
+		currentProcessGroup    int
+		want                   bool
+	}{
+		{
+			name:                   "foreground child process",
+			terminal:               true,
+			foregroundProcessGroup: 10,
+			currentProcessGroup:    10,
+			want:                   true,
+		},
+		{
+			name:                   "namespace supervisor",
+			terminal:               true,
+			joinParentProcessGroup: true,
+			foregroundProcessGroup: 10,
+			currentProcessGroup:    10,
+		},
+		{
+			name:                   "background process",
+			terminal:               true,
+			foregroundProcessGroup: 20,
+			currentProcessGroup:    10,
+		},
+		{
+			name:                   "no terminal",
+			foregroundProcessGroup: 10,
+			currentProcessGroup:    10,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := shouldManageForeground(
+				test.terminal,
+				test.joinParentProcessGroup,
+				test.foregroundProcessGroup,
+				test.currentProcessGroup,
+			)
+			if got != test.want {
+				t.Errorf("shouldManageForeground() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestNamespaceProcessAttributes(t *testing.T) {
 	t.Parallel()
 

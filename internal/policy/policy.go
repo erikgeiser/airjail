@@ -7,6 +7,8 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+
+	"github.com/erikgeiser/airjail/internal/logging"
 )
 
 // Resolver resolves hostnames into canonical IP addresses.
@@ -18,7 +20,7 @@ type Resolver interface {
 type Options struct {
 	Resolver        Resolver
 	AllowUnresolved bool
-	Warn            func(message string)
+	Logger          *logging.Logger
 }
 
 // Policy is an immutable, parsed egress policy.
@@ -89,9 +91,7 @@ func resolveHostRules(
 				return fmt.Errorf("resolve hostname rule %q: %w", rule.hostname, result.err)
 			}
 
-			if options.Warn != nil {
-				options.Warn(fmt.Sprintf("hostname rule %q did not resolve: %v", rule.hostname, result.err))
-			}
+			options.Logger.Warnf("hostname rule %q did not resolve: %v", rule.hostname, result.err)
 
 			continue
 		}
@@ -101,9 +101,7 @@ func resolveHostRules(
 				return fmt.Errorf("resolve hostname rule %q: resolver returned no addresses", rule.hostname)
 			}
 
-			if options.Warn != nil {
-				options.Warn(fmt.Sprintf("hostname rule %q resolved to no addresses", rule.hostname))
-			}
+			options.Logger.Warnf("hostname rule %q resolved to no addresses", rule.hostname)
 
 			continue
 		}

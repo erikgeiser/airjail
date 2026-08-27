@@ -1,4 +1,4 @@
-package session
+package application
 
 import (
 	"os"
@@ -12,7 +12,7 @@ func TestCreateAndClose(t *testing.T) {
 
 	runtimeDirectory := t.TempDir()
 
-	created, err := Create(os.Getuid(), runtimeDirectory)
+	created, err := createRuntimeDir(os.Getuid(), runtimeDirectory)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestCreateRejectsUnsafeRuntimeBase(t *testing.T) {
 		t.Fatalf("create unsafe base: %v", err)
 	}
 
-	_, err = Create(os.Getuid(), runtimeDirectory)
+	_, err = createRuntimeDir(os.Getuid(), runtimeDirectory)
 	if err == nil {
 		t.Fatal("Create unexpectedly accepted an unsafe runtime base")
 	}
@@ -73,7 +73,7 @@ func TestCreateRejectsLongSocketPath(t *testing.T) {
 		t.Fatalf("create long runtime directory: %v", err)
 	}
 
-	_, err = Create(os.Getuid(), runtimeDirectory)
+	_, err = createRuntimeDir(os.Getuid(), runtimeDirectory)
 	if err == nil {
 		t.Fatal("Create unexpectedly accepted overlong socket paths")
 	}

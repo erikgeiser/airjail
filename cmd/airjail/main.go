@@ -8,6 +8,7 @@ import (
 
 	"github.com/erikgeiser/airjail/internal/application"
 	"github.com/erikgeiser/airjail/internal/cli"
+	"github.com/erikgeiser/airjail/internal/logging"
 	"github.com/erikgeiser/airjail/internal/namespace"
 	"github.com/spf13/pflag"
 )
@@ -46,12 +47,14 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 	var (
 		httpSocket          string
 		socksSocket         string
+		logLevel            string
 		preservePermissions bool
 		restrictUnixSockets bool
 	)
 
 	flags.StringVar(&httpSocket, cli.SupervisorHTTPSocketOption, "", "outer HTTP proxy socket")
 	flags.StringVar(&socksSocket, cli.SupervisorSOCKSSocketOption, "", "outer SOCKS proxy socket")
+	flags.StringVar(&logLevel, cli.SupervisorLogLevel, "warning", "log level")
 	flags.BoolVar(
 		&preservePermissions,
 		cli.SupervisorPreservePermissionsOption,
@@ -80,6 +83,11 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		return 0, fmt.Errorf("get supervisor working directory: %w", err)
 	}
 
+	logger, err := logging.New(os.Stderr, logLevel, "supervisor")
+	if err != nil {
+		return 0, fmt.Errorf("setup supervisor logger: %w", err)
+	}
+
 	return namespace.RunSupervisor(ctx, namespace.SupervisorOptions{
 		Command:             command,
 		Environment:         os.Environ(),
@@ -88,5 +96,6 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		SOCKSocket:          socksSocket,
 		PreservePermissions: preservePermissions,
 		RestrictUnixSockets: restrictUnixSockets,
+		Logger:              logger,
 	})
 }

@@ -248,7 +248,7 @@ func parseURLAuthority(host, rawPort string, defaultPort uint16) (policy.Destina
 func canonicalAuthority(destination policy.Destination, port uint16, includePort bool) string {
 	host := destination.Hostname()
 	if !destination.IsHostname() {
-		host = destination.Address().String()
+		host = destination.RoutingAddress().String()
 		if destination.Address().Is6() && !includePort {
 			return "[" + host + "]"
 		}

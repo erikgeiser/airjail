@@ -2,11 +2,14 @@
 package policy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/netip"
 	"slices"
 	"testing"
+
+	"github.com/erikgeiser/airjail/internal/logging"
 )
 
 type fakeResolver struct {
@@ -237,21 +240,25 @@ func TestUnresolvedHostnamePolicy(t *testing.T) {
 		t.Fatal("New unexpectedly accepted an unresolved rule")
 	}
 
-	warnings := []string{}
+	var warningOutput bytes.Buffer
+
+	logger, err := logging.New(&warningOutput, "warning", "")
+	if err != nil {
+		t.Fatalf("create logger: %v", err)
+	}
 
 	policy, err := New(context.Background(), []string{"missing.example"}, nil, Options{
 		Resolver:        resolver,
 		AllowUnresolved: true,
-		Warn: func(message string) {
-			warnings = append(warnings, message)
-		},
+		Logger:          logger,
 	})
 	if err != nil {
 		t.Fatalf("New with AllowUnresolved: %v", err)
 	}
 
-	if len(warnings) != 1 {
-		t.Fatalf("warning count = %d, want 1", len(warnings))
+	wantWarning := "airjail: warning: hostname rule \"missing.example\" did not resolve: name not found\n"
+	if warningOutput.String() != wantWarning {
+		t.Fatalf("warning output = %q, want %q", warningOutput.String(), wantWarning)
 	}
 
 	allowed, err := policy.Allows("missing.example", netip.Addr{}, 443)

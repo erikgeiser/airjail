@@ -157,6 +157,52 @@ func TestNormalizeHostname(t *testing.T) {
 	}
 }
 
+func TestParseDestinationPreservesIPv6ZoneForRouting(t *testing.T) {
+	t.Parallel()
+
+	destination, err := ParseDestination("fe80::1%eth0")
+	if err != nil {
+		t.Fatalf("ParseDestination: %v", err)
+	}
+
+	if destination.IsHostname() {
+		t.Fatal("scoped IPv6 destination was classified as a hostname")
+	}
+
+	if destination.Address() != netip.MustParseAddr("fe80::1") {
+		t.Errorf("policy address = %s, want fe80::1", destination.Address())
+	}
+
+	if destination.Zone() != "eth0" {
+		t.Errorf("zone = %q, want eth0", destination.Zone())
+	}
+
+	if destination.RoutingAddress() != netip.MustParseAddr("fe80::1%eth0") {
+		t.Errorf("routing address = %s, want fe80::1%%eth0", destination.RoutingAddress())
+	}
+}
+
+func TestParseDestinationRejectsUnsafeIPv6Zone(t *testing.T) {
+	t.Parallel()
+
+	for _, rawDestination := range []string{
+		"fe80::1%bad/zone",
+		"fe80::1%bad zone",
+		"fe80::1%bad\nzone",
+		"fe80::1%interface-name-too-long",
+		"::ffff:192.0.2.1%eth0",
+	} {
+		t.Run(rawDestination, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := ParseDestination(rawDestination)
+			if err == nil {
+				t.Fatalf("ParseDestination(%q) unexpectedly succeeded", rawDestination)
+			}
+		})
+	}
+}
+
 func TestParseDestinationKeepsLegacyNumericHostnamesTyped(t *testing.T) {
 	t.Parallel()
 

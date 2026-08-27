@@ -1,5 +1,4 @@
-// Package session manages per-invocation runtime files.
-package session
+package application
 
 import (
 	"fmt"
@@ -10,15 +9,14 @@ import (
 
 const maxUnixSocketPath = 107
 
-// Session owns one invocation's private runtime directory.
-type Session struct {
+// runtimeDir owns one invocation's private runtime directory.
+type runtimeDir struct {
 	Directory  string
 	HTTPSocket string
 	SOCKSocket string
 }
 
-// Create creates a private, unique runtime directory for uid.
-func Create(uid int, runtimeDirectory string) (*Session, error) {
+func createRuntimeDir(uid int, runtimeDirectory string) (*runtimeDir, error) {
 	base := runtimeDirectory
 	if base == "" {
 		base = filepath.Join("/tmp", fmt.Sprintf("airjail-%d", uid))
@@ -43,25 +41,25 @@ func Create(uid int, runtimeDirectory string) (*Session, error) {
 		return nil, fmt.Errorf("set session directory permissions: %w", err)
 	}
 
-	session := &Session{
+	runDir := &runtimeDir{
 		Directory:  directory,
 		HTTPSocket: filepath.Join(directory, "http.sock"),
 		SOCKSocket: filepath.Join(directory, "socks.sock"),
 	}
-	if len(session.HTTPSocket) > maxUnixSocketPath || len(session.SOCKSocket) > maxUnixSocketPath {
+	if len(runDir.HTTPSocket) > maxUnixSocketPath || len(runDir.SOCKSocket) > maxUnixSocketPath {
 		_ = os.RemoveAll(directory)
 
 		return nil, fmt.Errorf("session socket path exceeds Linux Unix socket path limit under %q", base)
 	}
 
-	return session, nil
+	return runDir, nil
 }
 
 // Close removes this invocation's runtime directory.
-func (session *Session) Close() error {
-	err := os.RemoveAll(session.Directory)
+func (sess *runtimeDir) Close() error {
+	err := os.RemoveAll(sess.Directory)
 	if err != nil {
-		return fmt.Errorf("remove session directory %q: %w", session.Directory, err)
+		return fmt.Errorf("remove session directory %q: %w", sess.Directory, err)
 	}
 
 	return nil

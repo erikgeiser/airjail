@@ -172,6 +172,23 @@ func TestPlainHTTPForwarding(t *testing.T) {
 	}
 }
 
+func TestParseAuthorityPreservesIPv6Zone(t *testing.T) {
+	t.Parallel()
+
+	destination, port, err := parseAuthority("[fe80::1%eth0]:443")
+	if err != nil {
+		t.Fatalf("parseAuthority: %v", err)
+	}
+
+	if destination.Address().String() != "fe80::1" || destination.Zone() != "eth0" || port != 443 {
+		t.Errorf("destination = %s%%%s:%d, want fe80::1%%eth0:443", destination.Address(), destination.Zone(), port)
+	}
+
+	if authority := canonicalAuthority(destination, port, true); authority != "[fe80::1%eth0]:443" {
+		t.Errorf("canonical authority = %q, want %q", authority, "[fe80::1%eth0]:443")
+	}
+}
+
 func TestDeniedConnectReturnsForbidden(t *testing.T) {
 	t.Parallel()
 

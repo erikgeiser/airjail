@@ -120,6 +120,43 @@ func TestDirectNeverPassesLegacyNumericHostnameToDialer(t *testing.T) {
 	}
 }
 
+func TestDirectChecksScopedIPv6WithoutZoneAndRoutesWithZone(t *testing.T) {
+	t.Parallel()
+
+	networkPolicy, err := policy.New(context.Background(), []string{"fe80::1"}, nil, policy.Options{})
+	if err != nil {
+		t.Fatalf("policy.New: %v", err)
+	}
+
+	var routedAddress netip.Addr
+
+	route := func(_ context.Context, _ string, address netip.Addr, _ uint16) (net.Conn, error) {
+		routedAddress = address
+
+		client, server := net.Pipe()
+
+		t.Cleanup(func() { _ = server.Close() })
+
+		return client, nil
+	}
+
+	destination, err := policy.ParseDestination("fe80::1%eth0")
+	if err != nil {
+		t.Fatalf("policy.ParseDestination: %v", err)
+	}
+
+	connection, err := NewRouted(networkPolicy, nil, route).Dial(context.Background(), destination, 443)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+
+	t.Cleanup(func() { _ = connection.Close() })
+
+	if routedAddress != netip.MustParseAddr("fe80::1%eth0") {
+		t.Errorf("routed address = %s, want fe80::1%%eth0", routedAddress)
+	}
+}
+
 func TestDirectDoesNotDialDeniedAddress(t *testing.T) {
 	t.Parallel()
 

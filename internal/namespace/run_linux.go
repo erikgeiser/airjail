@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/erikgeiser/airjail/internal/logging"
 	"golang.org/x/sys/unix"
 )
 
@@ -19,9 +21,10 @@ type runOptions struct {
 	Sys                    *syscall.SysProcAttr
 	JoinParentProcessGroup bool
 	ReapProcessGroup       bool
+	Logger                 *logging.Logger
 }
 
-func runSupervisor(ctx context.Context, command []string, options runOptions) (int, error) {
+func runSandboxedProcess(ctx context.Context, command []string, options runOptions) (int, error) {
 	if len(command) == 0 {
 		return 0, fmt.Errorf("run process: command is empty")
 	}
@@ -32,13 +35,19 @@ func runSupervisor(ctx context.Context, command []string, options runOptions) (i
 	}
 
 	terminal, originalForeground := terminalForeground()
+	manageForeground := shouldManageForeground(
+		terminal,
+		options.JoinParentProcessGroup,
+		originalForeground,
+		unix.Getpgrp(),
+	)
 
 	sys := cloneSysProcAttr(options.Sys)
 	if !options.JoinParentProcessGroup {
 		sys.Setpgid = true
 	}
 
-	if terminal && !options.JoinParentProcessGroup {
+	if manageForeground {
 		signal.Ignore(syscall.SIGTTOU)
 
 		sys.Foreground = true
@@ -55,6 +64,8 @@ func runSupervisor(ctx context.Context, command []string, options runOptions) (i
 		Stderr:      os.Stderr,
 		SysProcAttr: sys,
 	}
+
+	options.Logger.Debugf("start sandboxed process: %s", strings.Join(command, " "))
 
 	err = child.Start()
 	if err != nil {
@@ -77,7 +88,7 @@ func runSupervisor(ctx context.Context, command []string, options runOptions) (i
 	go func() {
 		defer close(forwarderStopped)
 
-		forwardSignals(ctx, signals, done, signalTarget)
+		forwardSignals(ctx, signals, done, signalTarget, options.Logger)
 	}()
 
 	defer func() {
@@ -88,16 +99,22 @@ func runSupervisor(ctx context.Context, command []string, options runOptions) (i
 
 	defer func() {
 		if !childFinished {
-			_ = unix.Kill(signalTarget, unix.SIGKILL)
+			logIgnoredError(options.Logger, "kill process during cleanup", unix.Kill(signalTarget, unix.SIGKILL))
 		}
 
-		if terminal {
-			_ = setTerminalForeground(originalForeground)
+		if manageForeground {
+			logIgnoredError(
+				options.Logger,
+				"restore terminal foreground process group during cleanup",
+				setTerminalForeground(originalForeground),
+			)
 		}
 
-		_ = child.Process.Release()
+		logIgnoredError(options.Logger, "release process during cleanup", child.Process.Release())
 	}()
 
+	// wait for the child process, but actually all states and not just full
+	// exit like child.Wait() would, so it needs to be handled manually.
 	for {
 		var status unix.WaitStatus
 
@@ -134,8 +151,16 @@ func runSupervisor(ctx context.Context, command []string, options runOptions) (i
 
 			return 128 + int(status.Signal()), nil
 		case status.Stopped():
-			if terminal {
-				_ = setTerminalForeground(originalForeground)
+			// When the child stops, airjail stops itselfs so that the caller
+			// (e.g. the shell) can treat airjail like it would treat the child
+			// process if airjail was not in the middle. If airjail is resumed,
+			// it then returns the child again.
+			if manageForeground {
+				logIgnoredError(
+					options.Logger,
+					"restore terminal foreground process group for stopped process",
+					setTerminalForeground(originalForeground),
+				)
 			}
 
 			err = unix.Kill(os.Getpid(), unix.SIGSTOP)
@@ -143,11 +168,15 @@ func runSupervisor(ctx context.Context, command []string, options runOptions) (i
 				return 0, fmt.Errorf("stop supervisor: %w", err)
 			}
 
-			if terminal && !options.JoinParentProcessGroup {
-				_ = setTerminalForeground(pid)
+			if manageForeground {
+				logIgnoredError(
+					options.Logger,
+					"restore child terminal foreground process group after resume",
+					setTerminalForeground(pid),
+				)
 			}
 
-			_ = unix.Kill(signalTarget, unix.SIGCONT)
+			logIgnoredError(options.Logger, "continue child process after resume", unix.Kill(signalTarget, unix.SIGCONT))
 		}
 	}
 }
@@ -155,7 +184,7 @@ func runSupervisor(ctx context.Context, command []string, options runOptions) (i
 func terminateAndReapProcessGroup(processGroup int) error {
 	killErr := unix.Kill(-processGroup, unix.SIGKILL)
 	if killErr != nil && !errors.Is(killErr, unix.ESRCH) {
-		return fmt.Errorf("kill remaining processes in group %d: %w", processGroup, killErr)
+		return fmt.Errorf("kill rem aining processes in group %d: %w", processGroup, killErr)
 	}
 
 	for {
@@ -203,32 +232,59 @@ func terminalForeground() (bool, int) {
 	return true, foreground
 }
 
+func shouldManageForeground(
+	terminal bool,
+	joinParentProcessGroup bool,
+	foregroundProcessGroup int,
+	currentProcessGroup int,
+) bool {
+	return terminal && !joinParentProcessGroup && foregroundProcessGroup == currentProcessGroup
+}
+
 func setTerminalForeground(processGroup int) error {
 	return unix.IoctlSetPointerInt(int(os.Stdin.Fd()), unix.TIOCSPGRP, processGroup)
 }
 
-func forwardSignals(ctx context.Context, signals <-chan os.Signal, done <-chan struct{}, signalTarget int) {
+func forwardSignals(
+	ctx context.Context,
+	signals <-chan os.Signal,
+	done <-chan struct{},
+	signalTarget int,
+	logger *logging.Logger,
+) {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = unix.Kill(signalTarget, unix.SIGTERM)
+			logIgnoredError(logger, "terminate process after cancellation", unix.Kill(signalTarget, unix.SIGTERM))
 
+			timer := time.NewTimer(3 * time.Second)
 			select {
-			case <-time.After(3 * time.Second):
-				_ = unix.Kill(signalTarget, unix.SIGKILL)
+			case <-timer.C:
+				logIgnoredError(logger, "kill process after cancellation timeout", unix.Kill(signalTarget, unix.SIGKILL))
 			case <-done:
+				if !timer.Stop() {
+					<-timer.C
+				}
 			}
 
 			return
 		case received := <-signals:
 			signalValue, ok := received.(syscall.Signal)
 			if ok {
-				_ = unix.Kill(signalTarget, signalValue)
+				logIgnoredError(logger, fmt.Sprintf("forward signal %s", signalValue), unix.Kill(signalTarget, signalValue))
 			}
 		case <-done:
 			return
 		}
 	}
+}
+
+func logIgnoredError(logger *logging.Logger, operation string, err error) {
+	if err == nil {
+		return
+	}
+
+	logger.Debugf("ignored error while attempting to %s: %v", operation, err)
 }
 
 func forwardedSignals() []os.Signal {

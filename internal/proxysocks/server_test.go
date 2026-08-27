@@ -21,6 +21,25 @@ func (connector connectorFunc) Dial(
 	return connector(ctx, destination, port)
 }
 
+func TestValidatingResolverAcceptsScopedIPv6Domain(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	resolvedCtx, address, err := (validatingResolver{}).Resolve(ctx, "fe80::1%eth0")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if resolvedCtx != ctx {
+		t.Error("Resolve replaced the request context")
+	}
+
+	if address != nil {
+		t.Errorf("resolved address = %s, want nil to preserve scoped domain", address)
+	}
+}
+
 func TestSOCKSHostnameConnect(t *testing.T) {
 	t.Parallel()
 

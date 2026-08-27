@@ -9,8 +9,8 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/erikgeiser/airjail/internal/bridge"
 	"github.com/erikgeiser/airjail/internal/cli"
+	"github.com/erikgeiser/airjail/internal/logging"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 )
@@ -66,6 +66,7 @@ type ParentOptions struct {
 	SOCKSocket          string
 	Mode                Mode
 	RestrictUnixSockets bool
+	Logger              *logging.Logger
 }
 
 // Run starts the hidden supervisor in fresh user and network namespaces.
@@ -87,18 +88,23 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 		arguments = append(arguments, "--"+cli.SupervisorRestrictSocketsOption)
 	}
 
+	arguments = append(arguments, "--"+cli.SupervisorLogLevel, options.Logger.LevelName())
+
 	arguments = append(arguments, "--")
 	arguments = append(arguments, options.Command...)
 
 	sys := namespaceProcessAttributes(options.Mode)
 
-	exitCode, err := runSupervisor(ctx, arguments, runOptions{
+	logger := options.Logger.WithPrefix("supervisor")
+
+	exitCode, err := runSandboxedProcess(ctx, arguments, runOptions{
 		Environment: options.Environment,
 		Directory:   options.Directory,
 		Sys:         sys,
 		// Keep the hidden supervisor in airjail's shell job, only the actual
 		// command gets a foreground process group.
 		JoinParentProcessGroup: true,
+		Logger:                 logger,
 	})
 	if err != nil {
 		if options.Mode == PermissionPreservingMode {
@@ -117,7 +123,7 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 
 type bridgeServer struct {
 	listener  net.Listener
-	forwarder *bridge.Forwarder
+	forwarder *forwarder
 }
 
 func namespaceProcessAttributes(mode Mode) *syscall.SysProcAttr {
@@ -150,6 +156,7 @@ type SupervisorOptions struct {
 	SOCKSocket          string
 	PreservePermissions bool
 	RestrictUnixSockets bool
+	Logger              *logging.Logger
 }
 
 // RunSupervisor configures loopback, starts bridges, and supervises the command.
@@ -182,7 +189,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			return 0, fmt.Errorf("listen on inner HTTP proxy %s: %w", HTTPAddress, err)
 		}
 
-		servers = append(servers, bridgeServer{listener: listener, forwarder: bridge.New(options.HTTPSocket)})
+		servers = append(servers, bridgeServer{listener: listener, forwarder: newForwarder(options.HTTPSocket)})
 	}
 
 	if options.SOCKSocket != "" {
@@ -193,7 +200,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			return 0, fmt.Errorf("listen on inner SOCKS proxy %s: %w", SOCKAddress, err)
 		}
 
-		servers = append(servers, bridgeServer{listener: listener, forwarder: bridge.New(options.SOCKSocket)})
+		servers = append(servers, bridgeServer{listener: listener, forwarder: newForwarder(options.SOCKSocket)})
 	}
 
 	// Adopt orphaned command descendants so airjail can reap them instead of
@@ -250,10 +257,13 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			command = append([]string{executable, cli.RestrictedExecCommand, "--"}, command...)
 		}
 
-		childExitCode, childErr = runSupervisor(groupCtx, command, runOptions{
+		logger := options.Logger.WithPrefix("child")
+
+		childExitCode, childErr = runSandboxedProcess(groupCtx, command, runOptions{
 			Environment:      options.Environment,
 			Directory:        options.Directory,
 			ReapProcessGroup: true,
+			Logger:           logger,
 		})
 
 		return nil

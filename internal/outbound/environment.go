@@ -67,6 +67,16 @@ func (router *EnvironmentRouter) Dial(
 	address netip.Addr,
 	port uint16,
 ) (net.Conn, error) {
+	if address.Zone() != "" {
+		// IPv6 zones name interfaces on this host and cannot be delegated to an
+		// upstream proxy running in a different network context.
+		return router.dialer.DialContext(
+			ctx,
+			"tcp",
+			net.JoinHostPort(address.String(), strconv.Itoa(int(port))),
+		)
+	}
+
 	destinationHost := hostname
 	if destinationHost == "" {
 		destinationHost = address.String()

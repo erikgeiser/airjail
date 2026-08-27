@@ -3,6 +3,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -20,7 +21,6 @@ import (
 	"github.com/erikgeiser/airjail/internal/policy"
 	"github.com/erikgeiser/airjail/internal/proxyhttp"
 	"github.com/erikgeiser/airjail/internal/proxysocks"
-	"github.com/erikgeiser/airjail/internal/session"
 )
 
 // Run executes one public airjail invocation.
@@ -57,17 +57,15 @@ func Run(ctx context.Context, args []string) (int, error) {
 	}
 
 	if namespaceMode == namespace.RootlessMode {
-		logger.Log(logging.Info, "using rootless user and network namespaces")
+		logger.Infof("using rootless user and network namespaces")
 		logSupplementaryGroupLimitation(logger)
 	} else {
-		logger.Log(logging.Info, "using permission-preserving network namespace")
+		logger.Infof("using permission-preserving network namespace")
 	}
 
 	networkPolicy, err := policy.New(ctx, invocation.Config.Allow, invocation.Config.Block, policy.Options{
 		AllowUnresolved: invocation.Config.AllowUnresolvedRules,
-		Warn: func(message string) {
-			logger.Log(logging.Warning, "warning: %s", message)
-		},
+		Logger:          logger,
 	})
 	if err != nil {
 		return 0, err
@@ -75,7 +73,7 @@ func Run(ctx context.Context, args []string) (int, error) {
 
 	environment := childEnvironment(os.Environ(), !networkPolicy.Empty())
 	if networkPolicy.Empty() {
-		logger.Log(logging.Info, "empty policy: starting child in loopback-only namespace without proxies")
+		logger.Infof("empty policy: starting child in loopback-only namespace without proxies")
 
 		return namespace.Run(ctx, namespace.ParentOptions{
 			Executable:          executable,
@@ -84,6 +82,7 @@ func Run(ctx context.Context, args []string) (int, error) {
 			Directory:           workingDirectory,
 			Mode:                namespaceMode,
 			RestrictUnixSockets: invocation.Config.RestrictUnixSockets,
+			Logger:              logger,
 		})
 	}
 
@@ -111,35 +110,54 @@ func runWithProxies(
 	restrictUnixSockets bool,
 	logger *logging.Logger,
 ) (int, error) {
-	runtimeSession, err := session.Create(os.Getuid(), os.Getenv("XDG_RUNTIME_DIR"))
+	runDir, err := createRuntimeDir(os.Getuid(), os.Getenv("XDG_RUNTIME_DIR"))
 	if err != nil {
 		return 0, err
 	}
+
+	logger.Debugf("created network sockets in session directory %s", runDir.Directory)
+
 	defer func() {
-		closeErr := runtimeSession.Close()
+		closeErr := runDir.Close()
 		if closeErr != nil {
-			logger.Log(logging.Warning, "warning: %v", closeErr)
+			logger.Warnf("%v", closeErr)
+		} else {
+			logger.Debugf("cleaned up session directory %s", runDir.Directory)
 		}
 	}()
 
 	listenConfig := net.ListenConfig{}
 
-	httpListener, err := listenConfig.Listen(ctx, "unix", runtimeSession.HTTPSocket)
+	httpListener, err := listenConfig.Listen(ctx, "unix", runDir.HTTPSocket)
 	if err != nil {
 		return 0, fmt.Errorf("listen on outer HTTP proxy socket: %w", err)
 	}
 
-	defer func() { _ = httpListener.Close() }()
+	defer func() {
+		err := httpListener.Close()
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Warnf("could not close HTTP listener: %v", err)
+		} else {
+			logger.Debugf("closed HTTP listener")
+		}
+	}()
 
-	socksListener, err := listenConfig.Listen(ctx, "unix", runtimeSession.SOCKSocket)
+	socksListener, err := listenConfig.Listen(ctx, "unix", runDir.SOCKSocket)
 	if err != nil {
 		return 0, fmt.Errorf("listen on outer SOCKS proxy socket: %w", err)
 	}
-	defer func() { _ = socksListener.Close() }()
+	defer func() {
+		err := socksListener.Close()
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Warnf("could not close SOCKS listener: %v", err)
+		} else {
+			logger.Debugf("closed SOCKS listener")
+		}
+	}()
 
-	logger.Log(logging.Debug, "session dir %s", runtimeSession.Directory)
-	logger.Log(logging.Debug, "HTTP proxy listening inside network namespace at %s", namespace.HTTPAddress)
-	logger.Log(logging.Debug, "SOCKS proxy listening inside network namespace at %s", namespace.SOCKAddress)
+	logger.Debugf("session dir %s", runDir.Directory)
+	logger.Debugf("HTTP proxy listening inside network namespace at %s", namespace.HTTPAddress)
+	logger.Debugf("SOCKS proxy listening inside network namespace at %s", namespace.SOCKAddress)
 
 	router, err := outbound.NewEnvironmentRouter(os.Environ())
 	if err != nil {
@@ -158,7 +176,7 @@ func runWithProxies(
 			target = address.String()
 		}
 
-		logger.Log(logging.Debug, "%s tcp %s:%d -> %s", decision, target, port, address)
+		logger.Debugf("%s tcp %s:%d (%s)", decision, target, port, address)
 	})
 	httpServer := proxyhttp.New(connector)
 
@@ -199,10 +217,11 @@ func runWithProxies(
 			Command:             command,
 			Environment:         environment,
 			Directory:           workingDirectory,
-			HTTPSocket:          runtimeSession.HTTPSocket,
-			SOCKSocket:          runtimeSession.SOCKSocket,
+			HTTPSocket:          runDir.HTTPSocket,
+			SOCKSocket:          runDir.SOCKSocket,
 			Mode:                namespaceMode,
 			RestrictUnixSockets: restrictUnixSockets,
+			Logger:              logger,
 		})
 		commandResults <- commandResult{exitCode: exitCode, err: runErr}
 	}()
@@ -237,7 +256,7 @@ func runWithProxies(
 func logSupplementaryGroupLimitation(logger *logging.Logger) {
 	groups, err := os.Getgroups()
 	if err != nil {
-		logger.Log(logging.Warning, "warning: inspect supplementary groups: %v", err)
+		logger.Warnf("inspect supplementary groups: %v", err)
 
 		return
 	}
@@ -267,10 +286,9 @@ func logSupplementaryGroupLimitation(logger *logging.Logger) {
 		return
 	}
 
-	logger.Log(logging.Info,
+	logger.Infof(
 		"supplementary groups (%s) cannot be preserved by the rootless single-GID mapping",
 		strings.Join(supplementaryGroups, ", "))
-
 }
 
 func childEnvironment(original []string, proxyMode bool) []string {

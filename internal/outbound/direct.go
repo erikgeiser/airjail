@@ -71,7 +71,7 @@ func (direct *Direct) Dial(ctx context.Context, destination policy.Destination, 
 	}
 
 	if !destination.IsHostname() {
-		return direct.dialLiteral(ctx, destination.Address(), port)
+		return direct.dialLiteral(ctx, destination.RoutingAddress(), port)
 	}
 
 	addresses, err := direct.resolver.LookupNetIP(ctx, "ip", destination.Hostname())
@@ -123,7 +123,9 @@ func (direct *Direct) Dial(ctx context.Context, destination policy.Destination, 
 }
 
 func (direct *Direct) dialLiteral(ctx context.Context, address netip.Addr, port uint16) (net.Conn, error) {
-	allowed, err := direct.policy.Allows("", address, port)
+	policyAddress := address.WithZone("")
+
+	allowed, err := direct.policy.Allows("", policyAddress, port)
 	if err != nil {
 		return nil, fmt.Errorf("evaluate destination policy: %w", err)
 	}

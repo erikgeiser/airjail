@@ -216,11 +216,12 @@ func (validatingResolver) Resolve(ctx context.Context, hostname string) (context
 		return ctx, nil, fmt.Errorf("validate SOCKS hostname %q: %w", hostname, err)
 	}
 
-	if !destination.IsHostname() {
+	if !destination.IsHostname() && destination.Zone() == "" {
 		return ctx, nil, fmt.Errorf("validate SOCKS hostname %q: value is an IP address", hostname)
 	}
 
-	// A nil address keeps go-socks5's original FQDN for the policy-aware dialer
-	// while preventing an extra, policy-unbound DNS lookup in the backend.
+	// A scoped IPv6 address must use SOCKS' domain form because its native IPv6
+	// address type has no field for a zone. A nil address keeps that original
+	// value for the policy-aware dialer and also prevents an extra DNS lookup.
 	return ctx, nil, nil
 }

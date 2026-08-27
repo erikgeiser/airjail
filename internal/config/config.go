@@ -13,12 +13,11 @@ import (
 
 // Config is the effective user configuration.
 type Config struct {
-	Allow               []string `yaml:"allow"`
-	Block               []string `yaml:"block"`
-	Log                 string   `yaml:"log"`
-	RestrictUnixSockets bool     `yaml:"restrict_unix_sockets"` //nolint:tagliatelle
-	// The public YAML schema deliberately uses snake_case.
-	AllowUnresolvedRules bool `yaml:"allow_unresolved_rules"` //nolint:tagliatelle
+	Allow                []string `yaml:"allow"`
+	Block                []string `yaml:"block"`
+	Log                  string   `yaml:"log"`
+	RestrictUnixSockets  bool     `yaml:"restrict_unix_sockets"`
+	AllowUnresolvedRules bool     `yaml:"allow_unresolved_rules"`
 }
 
 // Load reads a strict YAML configuration file.
