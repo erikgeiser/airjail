@@ -7,7 +7,9 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/user"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -240,14 +242,35 @@ func logSupplementaryGroupLimitation(logger *logging.Logger) {
 		return
 	}
 
-	primaryGroup := os.Getgid()
-	for _, group := range groups {
-		if group != primaryGroup {
-			logger.Log(logging.Warning, "warning: supplementary groups cannot be preserved by the rootless single-GID mapping")
+	var (
+		primaryGroup               = os.Getgid()
+		supplementaryGroups        = make([]string, 0, max(0, len(groups)-1))
+		supplementaryGroupsPresent = false
+	)
 
-			return
+	for _, group := range groups {
+		if group == primaryGroup {
+			continue
+		}
+
+		supplementaryGroupsPresent = true
+
+		g, err := user.LookupGroupId(strconv.Itoa(group))
+		if err != nil {
+			supplementaryGroups = append(supplementaryGroups, strconv.Itoa(group))
+		} else {
+			supplementaryGroups = append(supplementaryGroups, g.Name)
 		}
 	}
+
+	if !supplementaryGroupsPresent {
+		return
+	}
+
+	logger.Log(logging.Info,
+		"supplementary groups (%s) cannot be preserved by the rootless single-GID mapping",
+		strings.Join(supplementaryGroups, ", "))
+
 }
 
 func childEnvironment(original []string, proxyMode bool) []string {
