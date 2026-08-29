@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/erikgeiser/airjail/internal/logging"
 	"golang.org/x/net/idna"
 )
 
@@ -43,7 +44,7 @@ type ruleSet struct {
 	prefixes  []prefixRule
 }
 
-func parseRules(rawRules []string) (ruleSet, error) {
+func parseRules(rawRules []string, logger *logging.Logger) (ruleSet, error) {
 	rules := ruleSet{
 		hosts:     make([]hostRule, 0, len(rawRules)),
 		addresses: make([]addressRule, 0, len(rawRules)),
@@ -51,7 +52,7 @@ func parseRules(rawRules []string) (ruleSet, error) {
 	}
 
 	for _, rawRule := range rawRules {
-		err := rules.add(rawRule)
+		err := rules.add(rawRule, logger)
 		if err != nil {
 			return ruleSet{}, fmt.Errorf("parse rule %q: %w", rawRule, err)
 		}
@@ -60,7 +61,7 @@ func parseRules(rawRules []string) (ruleSet, error) {
 	return rules, nil
 }
 
-func (rules *ruleSet) add(rawRule string) error {
+func (rules *ruleSet) add(rawRule string, logger *logging.Logger) error {
 	host, port, bracketed, err := splitRulePort(rawRule)
 	if err != nil {
 		return err
@@ -68,12 +69,13 @@ func (rules *ruleSet) add(rawRule string) error {
 
 	prefix, prefixErr := netip.ParsePrefix(host)
 	if prefixErr == nil {
-		if prefix != prefix.Masked() {
-			return fmt.Errorf("CIDR has host bits set")
+		maskedPrefix := prefix.Masked()
+		if prefix != maskedPrefix {
+			logger.Debugf("normalized CIDR %q to %q", prefix, maskedPrefix)
 		}
 
 		rules.prefixes = append(rules.prefixes, prefixRule{
-			prefix: normalizePrefix(prefix),
+			prefix: normalizePrefix(maskedPrefix),
 			port:   port,
 		})
 

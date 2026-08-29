@@ -31,12 +31,12 @@ type Policy struct {
 
 // New parses rules and resolves exact hostname rules.
 func New(ctx context.Context, allowRules, blockRules []string, options Options) (*Policy, error) {
-	allow, err := parseRules(allowRules)
+	allow, err := parseRules(allowRules, options.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("parse allow policy: %w", err)
 	}
 
-	block, err := parseRules(blockRules)
+	block, err := parseRules(blockRules, options.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("parse block policy: %w", err)
 	}

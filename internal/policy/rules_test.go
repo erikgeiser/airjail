@@ -2,8 +2,11 @@
 package policy
 
 import (
+	"bytes"
 	"net/netip"
 	"testing"
+
+	"github.com/erikgeiser/airjail/internal/logging"
 )
 
 func TestParseRulesClassifiesStrictly(t *testing.T) {
@@ -36,8 +39,16 @@ func TestParseRulesClassifiesStrictly(t *testing.T) {
 		{name: "IPv6 with port", raw: "[2001:db8::1]:443", address: "2001:db8::1", port: 443, portSpecified: true},
 		{name: "ambiguous raw IPv6 remains address", raw: "2001:db8::1:443", address: "2001:db8::1:443"},
 		{name: "IPv4 prefix", raw: "10.0.0.0/8", prefix: "10.0.0.0/8"},
+		{name: "IPv4 prefix with host bits", raw: "10.1.2.3/8", prefix: "10.0.0.0/8"},
 		{name: "IPv4 prefix with port", raw: "10.0.0.0/8:443", prefix: "10.0.0.0/8", port: 443, portSpecified: true},
 		{name: "IPv6 prefix with port", raw: "[2001:db8::/32]:443", prefix: "2001:db8::/32", port: 443, portSpecified: true},
+		{
+			name:          "IPv6 prefix with host bits and port",
+			raw:           "[2001:db8:1::1/48]:443",
+			prefix:        "2001:db8:1::/48",
+			port:          443,
+			portSpecified: true,
+		},
 		{name: "mapped IPv4", raw: "::ffff:127.0.0.1", address: "127.0.0.1"},
 	}
 
@@ -45,7 +56,7 @@ func TestParseRulesClassifiesStrictly(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			rules, err := parseRules([]string{test.raw})
+			rules, err := parseRules([]string{test.raw}, nil)
 			if err != nil {
 				t.Fatalf("parseRules(%q): %v", test.raw, err)
 			}
@@ -89,6 +100,40 @@ func TestParseRulesClassifiesStrictly(t *testing.T) {
 	}
 }
 
+func TestParseRulesLogsCIDRNormalizationAtDebugLevel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		level string
+		want  string
+	}{
+		{level: "info"},
+		{level: "debug", want: "airjail: debug: normalized CIDR \"10.1.2.3/8\" to \"10.0.0.0/8\"\n"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.level, func(t *testing.T) {
+			t.Parallel()
+
+			var output bytes.Buffer
+
+			logger, err := logging.New(&output, test.level, "")
+			if err != nil {
+				t.Fatalf("logging.New: %v", err)
+			}
+
+			_, err = parseRules([]string{"10.1.2.3/8"}, logger)
+			if err != nil {
+				t.Fatalf("parseRules: %v", err)
+			}
+
+			if output.String() != test.want {
+				t.Errorf("log output = %q, want %q", output.String(), test.want)
+			}
+		})
+	}
+}
+
 func TestParseRulesRejectsInvalidRules(t *testing.T) {
 	t.Parallel()
 
@@ -112,7 +157,6 @@ func TestParseRulesRejectsInvalidRules(t *testing.T) {
 		"[2001:db8::1]",
 		"[example.com]:443",
 		"[2001:db8::1]:abc",
-		"10.1.2.3/8",
 		"fe80::1%eth0",
 	}
 
@@ -120,7 +164,7 @@ func TestParseRulesRejectsInvalidRules(t *testing.T) {
 		t.Run(rawRule, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := parseRules([]string{rawRule})
+			_, err := parseRules([]string{rawRule}, nil)
 			if err == nil {
 				t.Fatalf("parseRules(%q) unexpectedly succeeded", rawRule)
 			}
