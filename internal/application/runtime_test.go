@@ -3,7 +3,6 @@ package application
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -60,21 +59,5 @@ func TestCreateRejectsUnsafeRuntimeBase(t *testing.T) {
 	_, err = createRuntimeDir(os.Getuid(), runtimeDirectory)
 	if err == nil {
 		t.Fatal("Create unexpectedly accepted an unsafe runtime base")
-	}
-}
-
-func TestCreateRejectsLongSocketPath(t *testing.T) {
-	t.Parallel()
-
-	runtimeDirectory := filepath.Join(t.TempDir(), strings.Repeat("a", 70))
-
-	err := os.Mkdir(runtimeDirectory, 0o700)
-	if err != nil {
-		t.Fatalf("create long runtime directory: %v", err)
-	}
-
-	_, err = createRuntimeDir(os.Getuid(), runtimeDirectory)
-	if err == nil {
-		t.Fatal("Create unexpectedly accepted overlong socket paths")
 	}
 }

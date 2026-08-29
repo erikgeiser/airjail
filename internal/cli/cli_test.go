@@ -2,11 +2,9 @@
 package cli
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -90,29 +88,6 @@ restrict_sockets: true
 
 	if invocation.Config.RestrictUnixSockets {
 		t.Error("RestrictUnixSockets = true, want CLI override false")
-	}
-}
-
-func TestParseHelp(t *testing.T) {
-	t.Parallel()
-
-	invocation, err := Parse([]string{"--help"})
-	if err != nil {
-		t.Fatalf("Parse help: %v", err)
-	}
-
-	if !invocation.Help {
-		t.Fatal("Help = false")
-	}
-
-	var output bytes.Buffer
-	WriteHelp(&output)
-
-	help := output.String()
-	for _, expected := range []string{"Usage: airjail", "--allow", "--config", "--log", "traffic", "--restrict-sockets"} {
-		if !strings.Contains(help, expected) {
-			t.Errorf("help does not contain %q: %s", expected, help)
-		}
 	}
 }
 

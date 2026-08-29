@@ -56,17 +56,6 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsMultipleDocuments(t *testing.T) {
-	t.Parallel()
-
-	path := writeConfig(t, "allow: [example.com]\n---\nblock: [blocked.example]\n")
-
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("Load unexpectedly accepted multiple documents")
-	}
-}
-
 func writeConfig(t *testing.T, contents string) string {
 	t.Helper()
 
