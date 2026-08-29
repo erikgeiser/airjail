@@ -41,7 +41,7 @@ It follows these design principles:
 - **Easy to Use:** `airjail` is a single dependency-free binary that can easily
   be (cross-)compiled as it does not depend on `cgo`.
 
-### Configuration
+## Configuration
 
 **Operating Modes:**
 
@@ -119,7 +119,7 @@ restrict_sockets: true
 allow_unresolved_rules: false
 ```
 
-### Design
+## Design
 
 Airjail creates network isolation by launching a program in an empty network
 namespace that only creates a private loopback device. Initially, this prevents
@@ -146,7 +146,7 @@ that are assembled in pure Go. These rules restrict access to the syscalls
 `io_uring_setup` and the legacy syscall `socketcall`, as these could also be
 used to establish domain socket connections. It also forbids 32-bit syscalls.
 
-### Why airjail and not firejail, bubblewrap or sandbox-runtime?
+## Why airjail and not firejail, bubblewrap or sandbox-runtime?
 
 The reason for `airjail`'s development was the frustration about certain aspects
 of other available tools. Each of these tools works great, but does not fit all
@@ -214,7 +214,7 @@ isolation may still be desired in order to avoid the following issues:
   location (because its build command was not invoked), it silently skips
   applying `seccomp` rules. This can only be notices with debug logs.
 
-### Roadmap and Missing Features
+## Roadmap and Missing Features
 
 - **DNS, UDP and non-proxy-aware TCP traffic:** Currently, `airjail` allows
   outbound traffic through the SOCKS5 and HTTP/HTTPS proxies. It is planned to
