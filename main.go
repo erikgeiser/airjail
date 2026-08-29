@@ -15,6 +15,8 @@ import (
 
 const setupErrorExitCode = 125
 
+var version = "(custom build from git)"
+
 func main() {
 	exitCode, err := run(context.Background(), os.Args[1:])
 	if err != nil {
@@ -36,7 +38,7 @@ func run(ctx context.Context, args []string) (int, error) {
 		}
 	}
 
-	return application.Run(ctx, args)
+	return application.Run(ctx, args, version)
 }
 
 func runSupervisor(ctx context.Context, args []string) (int, error) {

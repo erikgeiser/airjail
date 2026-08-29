@@ -25,6 +25,7 @@ type Invocation struct {
 	Config  config.Config
 	Command []string
 	Help    bool
+	Version bool
 }
 
 type flagValues struct {
@@ -34,6 +35,7 @@ type flagValues struct {
 	logLevel            string
 	allowUnresolved     bool
 	restrictUnixSockets bool
+	version             bool
 }
 
 func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
@@ -49,6 +51,7 @@ func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
 		"Do not fail when destination hostname does not resolve")
 	flags.BoolVar(&values.restrictUnixSockets, "restrict-sockets", false,
 		"Restrict connection to unix domain sockets")
+	flags.BoolVar(&values.version, "version", false, "Print version and exit")
 
 	return flags
 }
@@ -74,6 +77,10 @@ func Parse(args []string) (Invocation, error) {
 
 	if err != nil {
 		return Invocation{}, fmt.Errorf("parse flags: %w", err)
+	}
+
+	if values.version {
+		return Invocation{Version: true}, nil
 	}
 
 	effective := config.Config{}

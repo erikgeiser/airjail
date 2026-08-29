@@ -23,7 +23,7 @@ import (
 )
 
 // Run executes one public airjail invocation.
-func Run(ctx context.Context, args []string) (int, error) {
+func Run(ctx context.Context, args []string, version string) (int, error) {
 	invocation, err := cli.Parse(args)
 	if err != nil {
 		return 0, err
@@ -31,6 +31,12 @@ func Run(ctx context.Context, args []string) (int, error) {
 
 	if invocation.Help {
 		cli.WriteHelp(os.Stdout)
+
+		return 0, nil
+	}
+
+	if invocation.Version {
+		_, _ = fmt.Fprintf(os.Stdout, "airjail %s\n", version)
 
 		return 0, nil
 	}

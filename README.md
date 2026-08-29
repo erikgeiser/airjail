@@ -119,7 +119,22 @@ restrict_sockets: true
 allow_unresolved_rules: false
 ```
 
-## Design
+## Building
+
+`airjail` does not require `cgo` and can be compiled or cross-compiled with the
+following command:
+
+```sh
+GOOS=linux go build .
+```
+
+The following command runs all tests but has to be executed on Linux:
+
+```sh
+go test ./...
+```
+
+## Technical Design and Implementation
 
 Airjail creates network isolation by launching a program in an empty network
 namespace that only creates a private loopback device. Initially, this prevents

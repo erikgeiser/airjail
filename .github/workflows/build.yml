@@ -22,7 +22,7 @@ jobs:
 
       - name: "build"
         run: |
-          go build ./cmd/airjail
+          go build .
 
       - name: "test"
         run: |
