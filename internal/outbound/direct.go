@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"strconv"
 
+	"github.com/erikgeiser/airjail/internal/logging"
 	"github.com/erikgeiser/airjail/internal/policy"
 )
 
@@ -26,11 +27,11 @@ type Direct struct {
 	policy      *policy.Policy
 	resolver    policy.Resolver
 	dialAddress AddressDialFunc
-	logDecision func(allowed bool, hostname string, address netip.Addr, port uint16)
+	logger      *logging.Logger
 }
 
 // NewDirect creates a connector using a conventional network dialer. It is primarily useful in tests.
-func NewDirect(networkPolicy *policy.Policy, resolver policy.Resolver, dial DialFunc) *Direct {
+func NewDirect(networkPolicy *policy.Policy, resolver policy.Resolver, dial DialFunc, logger *logging.Logger) *Direct {
 	if dial == nil {
 		netDialer := &net.Dialer{Timeout: connectTimeout}
 		dial = netDialer.DialContext
@@ -43,21 +44,21 @@ func NewDirect(networkPolicy *policy.Policy, resolver policy.Resolver, dial Dial
 		port uint16,
 	) (net.Conn, error) {
 		return dial(ctx, "tcp", net.JoinHostPort(address.String(), strconv.Itoa(int(port))))
-	})
+	}, logger)
 }
 
 // NewRouted creates a connector using route for approved addresses.
-func NewRouted(networkPolicy *policy.Policy, resolver policy.Resolver, route AddressDialFunc) *Direct {
+func NewRouted(
+	networkPolicy *policy.Policy,
+	resolver policy.Resolver,
+	route AddressDialFunc,
+	logger *logging.Logger,
+) *Direct {
 	if resolver == nil {
 		resolver = net.DefaultResolver
 	}
 
-	return &Direct{policy: networkPolicy, resolver: resolver, dialAddress: route}
-}
-
-// LogDecisions installs an optional per-address policy decision callback.
-func (direct *Direct) LogDecisions(logger func(bool, string, netip.Addr, uint16)) {
-	direct.logDecision = logger
+	return &Direct{policy: networkPolicy, resolver: resolver, dialAddress: route, logger: logger}
 }
 
 // Dial connects to a strictly parsed destination after checking the concrete dialed address.
@@ -99,9 +100,7 @@ func (direct *Direct) Dial(ctx context.Context, destination policy.Destination, 
 			return nil, fmt.Errorf("evaluate destination policy: %w", policyErr)
 		}
 
-		if direct.logDecision != nil {
-			direct.logDecision(allowed, destination.Hostname(), address, port)
-		}
+		direct.logDecision(allowed, destination.Hostname(), address, port)
 
 		if !allowed {
 			continue
@@ -130,9 +129,7 @@ func (direct *Direct) dialLiteral(ctx context.Context, address netip.Addr, port 
 		return nil, fmt.Errorf("evaluate destination policy: %w", err)
 	}
 
-	if direct.logDecision != nil {
-		direct.logDecision(allowed, "", address, port)
-	}
+	direct.logDecision(allowed, "", address, port)
 
 	if !allowed {
 		return nil, fmt.Errorf("%w: %s", ErrDenied, net.JoinHostPort(address.String(), strconv.Itoa(int(port))))
@@ -144,4 +141,17 @@ func (direct *Direct) dialLiteral(ctx context.Context, address netip.Addr, port 
 	}
 
 	return connection, nil
+}
+
+func (direct *Direct) logDecision(allowed bool, hostname string, address netip.Addr, port uint16) {
+	target := hostname
+	if target == "" {
+		target = address.String()
+	}
+
+	if allowed {
+		direct.logger.Allowf("tcp %s:%d (%s)", target, port, address)
+	} else {
+		direct.logger.Blockf("tcp %s:%d (%s)", target, port, address)
+	}
 }

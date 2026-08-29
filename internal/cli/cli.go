@@ -43,7 +43,8 @@ func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
 	flags.StringVar(&values.configPath, "config", "", "YAML config `path`")
 	flags.StringArrayVar(&values.allowRules, "allow", nil, "Allowed `destination` (repeatable)")
 	flags.StringArrayVar(&values.blockRules, "block", nil, "Blocked `destination` (repeatable)")
-	flags.StringVarP(&values.logLevel, "log", "l", "warning", "Log `level` (silent, warning, info, debug)")
+	flags.StringVarP(&values.logLevel, "log", "l", "warning",
+		"Log messages with this `level` or lower (silent < warning < traffic < info < debug)")
 	flags.BoolVar(&values.allowUnresolved, "allow-unresolved-rules", false,
 		"Do not fail when destination hostname does not resolve")
 	flags.BoolVar(&values.restrictUnixSockets, "restrict-sockets", false,

@@ -51,7 +51,7 @@ allow: [config.example]
 block: [blocked.example]
 log: debug
 allow_unresolved_rules: true
-restrict_unix_sockets: true
+restrict_sockets: true
 `)
 
 	err := os.WriteFile(configPath, contents, 0o600)
@@ -109,7 +109,7 @@ func TestParseHelp(t *testing.T) {
 	WriteHelp(&output)
 
 	help := output.String()
-	for _, expected := range []string{"Usage: airjail", "--allow", "--config", "--log", "--restrict-sockets"} {
+	for _, expected := range []string{"Usage: airjail", "--allow", "--config", "--log", "traffic", "--restrict-sockets"} {
 		if !strings.Contains(help, expected) {
 			t.Errorf("help does not contain %q: %s", expected, help)
 		}

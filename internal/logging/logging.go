@@ -15,8 +15,9 @@ type Level uint
 const (
 	Silent  Level = 0
 	Warning Level = 1
-	Info    Level = 2
-	Debug   Level = 3
+	Traffic Level = 2
+	Info    Level = 3
+	Debug   Level = 4
 )
 
 func (level Level) String() string {
@@ -25,6 +26,8 @@ func (level Level) String() string {
 		return "silent"
 	case Warning:
 		return "warning"
+	case Traffic:
+		return "traffic"
 	case Info:
 		return "info"
 	case Debug:
@@ -51,6 +54,8 @@ func New(writer io.Writer, level string, prefix string) (*Logger, error) {
 		l.Level = Silent
 	case "warning":
 		l.Level = Warning
+	case "traffic":
+		l.Level = Traffic
 	case "info":
 		l.Level = Info
 	case "debug":
@@ -88,7 +93,6 @@ func (logger *Logger) WithPrefix(prefix string) *Logger {
 	}
 }
 
-// LevelName returns the configured level name, or silent for a nil logger.
 func (logger *Logger) LevelName() string {
 	if logger == nil {
 		return Silent.String()
@@ -97,22 +101,27 @@ func (logger *Logger) LevelName() string {
 	return logger.Level.String()
 }
 
-// Debugf logs a debug message when debug logging is enabled.
 func (logger *Logger) Debugf(format string, arguments ...any) {
-	logger.logf(Debug, format, arguments...)
+	logger.logf(Debug, "debug", "\033[2m", format, arguments...)
 }
 
-// Infof logs an informational message when info or debug logging is enabled.
 func (logger *Logger) Infof(format string, arguments ...any) {
-	logger.logf(Info, format, arguments...)
+	logger.logf(Info, "info", "\033[36m", format, arguments...)
 }
 
-// Warnf logs a warning when warning, info, or debug logging is enabled.
+func (logger *Logger) Allowf(format string, arguments ...any) {
+	logger.logf(Traffic, "allowed", "\033[32m", format, arguments...)
+}
+
+func (logger *Logger) Blockf(format string, arguments ...any) {
+	logger.logf(Traffic, "blocked", "\033[31m", format, arguments...)
+}
+
 func (logger *Logger) Warnf(format string, arguments ...any) {
-	logger.logf(Warning, format, arguments...)
+	logger.logf(Warning, "warning", "\033[33m", format, arguments...)
 }
 
-func (logger *Logger) logf(level Level, format string, arguments ...any) {
+func (logger *Logger) logf(level Level, label, color, format string, arguments ...any) {
 	if logger == nil || logger.writer == nil || level == Silent || level > logger.Level {
 		return
 	}
@@ -122,22 +131,11 @@ func (logger *Logger) logf(level Level, format string, arguments ...any) {
 		logString = fmt.Sprintf(logString, arguments...)
 	}
 
-	var (
-		style = ""
-		reset = ""
-	)
-
+	reset := ""
 	if logger.Colored {
 		reset = "\033[0m"
-
-		switch level {
-		case Warning:
-			style = "\033[2;33m"
-		case Info:
-			style = "\033[34m"
-		default:
-			style = "\033[2m"
-		}
+	} else {
+		color = ""
 	}
 
 	prefix := ""
@@ -145,5 +143,5 @@ func (logger *Logger) logf(level Level, format string, arguments ...any) {
 		prefix = logger.prefix + ": "
 	}
 
-	_, _ = fmt.Fprintf(logger.writer, "%sairjail: %s: %s%s%s\n", style, level, prefix, logString, reset)
+	_, _ = fmt.Fprintf(logger.writer, "%sairjail: %s: %s%s%s\n", color, label, prefix, logString, reset)
 }

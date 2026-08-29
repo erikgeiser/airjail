@@ -16,7 +16,7 @@ block:
   - "*.blocked.example:443"
 log: debug
 allow_unresolved_rules: true
-restrict_unix_sockets: true
+restrict_sockets: true
 `)
 
 	loaded, err := Load(path)

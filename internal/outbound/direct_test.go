@@ -1,6 +1,7 @@
 package outbound
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/erikgeiser/airjail/internal/logging"
 	"github.com/erikgeiser/airjail/internal/policy"
 )
 
@@ -63,7 +65,14 @@ func TestDirectDialsOnlyApprovedResolvedAddress(t *testing.T) {
 		t.Fatalf("policy.ParseDestination: %v", err)
 	}
 
-	connection, err := NewDirect(networkPolicy, resolver, dial).Dial(context.Background(), destination, 443)
+	var logOutput bytes.Buffer
+
+	logger, err := logging.New(&logOutput, "traffic", "")
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+
+	connection, err := NewDirect(networkPolicy, resolver, dial, logger).Dial(context.Background(), destination, 443)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -72,6 +81,12 @@ func TestDirectDialsOnlyApprovedResolvedAddress(t *testing.T) {
 
 	if dialedAddress != "192.0.2.10:443" {
 		t.Errorf("dialed address = %q, want 192.0.2.10:443", dialedAddress)
+	}
+
+	wantLog := "airjail: blocked: tcp service.example:443 (10.0.0.1)\n" +
+		"airjail: allowed: tcp service.example:443 (192.0.2.10)\n"
+	if logOutput.String() != wantLog {
+		t.Errorf("log output = %q, want %q", logOutput.String(), wantLog)
 	}
 }
 
@@ -108,7 +123,7 @@ func TestDirectNeverPassesLegacyNumericHostnameToDialer(t *testing.T) {
 		t.Fatalf("policy.ParseDestination: %v", err)
 	}
 
-	connection, err := NewDirect(networkPolicy, resolver, dial).Dial(context.Background(), destination, 80)
+	connection, err := NewDirect(networkPolicy, resolver, dial, nil).Dial(context.Background(), destination, 80)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -145,7 +160,7 @@ func TestDirectChecksScopedIPv6WithoutZoneAndRoutesWithZone(t *testing.T) {
 		t.Fatalf("policy.ParseDestination: %v", err)
 	}
 
-	connection, err := NewRouted(networkPolicy, nil, route).Dial(context.Background(), destination, 443)
+	connection, err := NewRouted(networkPolicy, nil, route, nil).Dial(context.Background(), destination, 443)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -185,7 +200,7 @@ func TestDirectDoesNotDialDeniedAddress(t *testing.T) {
 		t.Fatalf("policy.ParseDestination: %v", err)
 	}
 
-	connection, err := NewDirect(networkPolicy, resolver, dial).Dial(context.Background(), destination, 443)
+	connection, err := NewDirect(networkPolicy, resolver, dial, nil).Dial(context.Background(), destination, 443)
 	if connection != nil {
 		_ = connection.Close()
 

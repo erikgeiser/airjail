@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/netip"
 	"os"
 	"os/user"
 	"slices"
@@ -164,20 +163,7 @@ func runWithProxies(
 		return 0, err
 	}
 
-	connector := outbound.NewRouted(networkPolicy, nil, router.Dial)
-	connector.LogDecisions(func(allowed bool, hostname string, address netip.Addr, port uint16) {
-		decision := "block"
-		if allowed {
-			decision = "allow"
-		}
-
-		target := hostname
-		if target == "" {
-			target = address.String()
-		}
-
-		logger.Debugf("%s tcp %s:%d (%s)", decision, target, port, address)
-	})
+	connector := outbound.NewRouted(networkPolicy, nil, router.Dial, logger)
 	httpServer := proxyhttp.New(connector)
 
 	socksServer, err := proxysocks.New(connector)
