@@ -26,18 +26,19 @@ It follows these design principles:
   isolation. All other isolation types are well served by tools such as
   `firejail` or `bubblewrap` and both of these tools can be combined with
   `airjail` for exhaustive sandboxing. The only exception in `airjail` is
-  blocking access to Unix domain sockets, which is an opt-in feature intended to
-  support the network isolation in certain scenarios.
+  blocking access to Unix domain and vsock sockets, which is an opt-in feature
+  intended to support the network isolation in certain scenarios.
 - **Transparent:** `airjail` aims to act like a transparent shim that interferes
   with the execution of the program as little as possible. It is therefore
   designed to provide the same experience regarding
   foregrounding/backgrounding/signaling/TTY as if the program was started
   without `airjail`.
 - **Unprivileged:** No privileges or capabilities are required for `airjail`.
-  However, if the capabilities `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` are present,
-  it can start the process with completely intact permissions. Without these
-  capabilities, the process only loses supplementary groups except for the
-  primary user group, which should not make a difference in most cases.
+  When existing capabilities permit direct network namespace creation, airjail
+  preserves the caller's identity and permissions except for dangerous
+  capabilities that could bypass isolation or compromise the kernel. Without
+  namespace setup capabilities, the process only loses supplementary groups
+  except for the primary user group, which should not matter in most cases.
 - **Easy to Use:** `airjail` is a single dependency-free binary that can easily
   be (cross-)compiled as it does not depend on `cgo`.
 
@@ -75,18 +76,35 @@ Each rule can reference destinations in multiple ways:
 - **Ports:** Each of the aforementioned types of destinations can be specified
   with and without port. Omitting the port means all ports are matched.
 
-**Unix Domain Sockets:**
+**Local Sockets:**
 
-Airjail can optionally also deny access to Unix domain sockets. While such
-sockets are local IPC rather than network access, they can often be used to
-circumvent network restrictions. For example, when SSH is used with the
-`ControlMaster` feature on the host, network isolated processes could connect to
-the `ControlMaster` socket in order to SSH into machines through an existing
-connection that was established outside of the network isolation. On the other
-hand, Unix domain sockets are also used extensively for normal purposes. As
-such, this feature remains opt-in. Alternatively, however, `airjail` can be used
-together with `firejail`, `bubblewrap` or a container to remove dangerous
-sockets from the filesystem.
+Airjail can optionally deny creation of Unix domain and vsock sockets. While
+Unix sockets are local IPC rather than network access, they can often be used to
+circumvent network restrictions. Vsock can similarly reach host or hypervisor
+services without traversing the network namespace. For example, when SSH is used
+with the `ControlMaster` feature on the host, network isolated processes could
+connect to the `ControlMaster` socket in order to SSH into machines through an
+existing connection that was established outside of the network isolation. On
+the other hand, Unix domain sockets are also used extensively for normal
+purposes. As such, this feature remains opt-in. Alternatively, however,
+`airjail` can be used together with `firejail`, `bubblewrap` or a container to
+remove dangerous sockets from the filesystem.
+
+**Dangerous Capabilities:**
+
+In permission-preserving namespace mode, airjail drops `CAP_SYS_ADMIN`,
+`CAP_NET_ADMIN`, `CAP_SYS_PTRACE`, `CAP_SYS_MODULE`, `CAP_SYS_RAWIO`, `CAP_BPF`,
+`CAP_PERFMON`, and `CAP_CHECKPOINT_RESTORE` from the child and its capability
+bounding set. A capability can be preserved explicitly with a repeatable unsafe
+option:
+
+```sh
+airjail --keep-unsafe-capability CAP_SYS_ADMIN command
+```
+
+Keeping dangerous capabilities is only recommended when there is an additional
+sandboxing layer such as `firejail` or `bubblewrap` that ensures a safe runtime
+environment. Rootless namespace mode continues to drop all setup capabilities.
 
 **CLI and Config:**
 
@@ -155,9 +173,9 @@ perform DNS queries as hostnames are only resolved through the proxies. However,
 these limitations are surprisingly less of an issue that expected in practice.
 Support for non-proxy-aware programs is still planned (see roadmap).
 
-The opt-in feature to restrict Unix domain sockets loads `seccomp` `BPF` rules
-that are assembled in pure Go. These rules restrict access to the syscalls
-`socket` and `socketpair` when called with `AF_UNIX`. It also restricts
+The opt-in feature to restrict local sockets loads `seccomp` `BPF` rules that
+are assembled in pure Go. These rules restrict access to the syscalls `socket`
+and `socketpair` when called with `AF_UNIX` or `AF_VSOCK`. It also restricts
 `io_uring_setup` and the legacy syscall `socketcall`, as these could also be
 used to establish domain socket connections. It also forbids 32-bit syscalls.
 

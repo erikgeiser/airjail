@@ -58,19 +58,25 @@ func capabilityEffective(data [2]unix.CapUserData, capability int) bool {
 
 // ParentOptions configures the hidden supervisor process.
 type ParentOptions struct {
-	Executable          string
-	Command             []string
-	Environment         []string
-	Directory           string
-	HTTPSocket          string
-	SOCKSocket          string
-	Mode                Mode
-	RestrictUnixSockets bool
-	Logger              *logging.Logger
+	Executable             string
+	Command                []string
+	Environment            []string
+	Directory              string
+	HTTPSocket             string
+	SOCKSocket             string
+	Mode                   Mode
+	RestrictUnixSockets    bool
+	KeepUnsafeCapabilities []string
+	Logger                 *logging.Logger
 }
 
 // Run starts the hidden supervisor in fresh user and network namespaces.
 func Run(ctx context.Context, options ParentOptions) (int, error) {
+	keptCapabilities, err := resolveUnsafeCapabilities(options.KeepUnsafeCapabilities, options.Mode, options.Logger)
+	if err != nil {
+		return 0, err
+	}
+
 	arguments := []string{options.Executable, cli.SupervisorCommand}
 	if options.HTTPSocket != "" {
 		arguments = append(arguments, "--"+cli.SupervisorHTTPSocketOption, options.HTTPSocket)
@@ -86,6 +92,10 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 
 	if options.RestrictUnixSockets {
 		arguments = append(arguments, "--"+cli.SupervisorRestrictSocketsOption)
+	}
+
+	for _, capability := range keptCapabilities {
+		arguments = append(arguments, "--"+cli.SupervisorKeepUnsafeCapability, capability)
 	}
 
 	arguments = append(arguments, "--"+cli.SupervisorLogLevel, options.Logger.LevelName())
@@ -149,14 +159,15 @@ func namespaceProcessAttributes(mode Mode) *syscall.SysProcAttr {
 
 // SupervisorOptions configures the process already running inside the namespaces.
 type SupervisorOptions struct {
-	Command             []string
-	Environment         []string
-	Directory           string
-	HTTPSocket          string
-	SOCKSocket          string
-	PreservePermissions bool
-	RestrictUnixSockets bool
-	Logger              *logging.Logger
+	Command                []string
+	Environment            []string
+	Directory              string
+	HTTPSocket             string
+	SOCKSocket             string
+	PreservePermissions    bool
+	RestrictUnixSockets    bool
+	KeepUnsafeCapabilities []string
+	Logger                 *logging.Logger
 }
 
 // RunSupervisor configures loopback, starts bridges, and supervises the command.
@@ -212,13 +223,29 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 		return 0, fmt.Errorf("set child subreaper: %w", err)
 	}
 
-	if !options.PreservePermissions {
+	if options.PreservePermissions {
+		err = dropDangerousCapabilities(options.KeepUnsafeCapabilities)
+	} else {
 		err = dropSetupCapabilities()
-		if err != nil {
+	}
+
+	if err != nil {
+		closeBridgeListeners(servers)
+
+		return 0, err
+	}
+
+	var childProcessAttributes *syscall.SysProcAttr
+
+	if options.PreservePermissions {
+		ambientCapabilities, capabilityErr := unsafeCapabilityValues(options.KeepUnsafeCapabilities)
+		if capabilityErr != nil {
 			closeBridgeListeners(servers)
 
-			return 0, err
+			return 0, capabilityErr
 		}
+
+		childProcessAttributes = &syscall.SysProcAttr{AmbientCaps: ambientCapabilities}
 	}
 
 	group, groupCtx := errgroup.WithContext(ctx)
@@ -262,6 +289,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 		childExitCode, childErr = runSandboxedProcess(groupCtx, command, runOptions{
 			Environment:      options.Environment,
 			Directory:        options.Directory,
+			Sys:              childProcessAttributes,
 			ReapProcessGroup: true,
 			Logger:           logger,
 		})

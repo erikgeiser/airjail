@@ -50,6 +50,7 @@ block: [blocked.example]
 log: debug
 allow_unresolved_rules: true
 restrict_sockets: true
+keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 `)
 
 	err := os.WriteFile(configPath, contents, 0o600)
@@ -64,6 +65,7 @@ restrict_sockets: true
 		"--log", "info",
 		"--allow-unresolved-rules=false",
 		"--restrict-sockets=false",
+		"--keep-unsafe-capability", "CAP_SYS_ADMIN",
 		"command",
 	})
 	if err != nil {
@@ -88,6 +90,15 @@ restrict_sockets: true
 
 	if invocation.Config.RestrictUnixSockets {
 		t.Error("RestrictUnixSockets = true, want CLI override false")
+	}
+
+	wantCapabilities := []string{"CAP_SYS_PTRACE", "CAP_SYS_ADMIN"}
+	if !slices.Equal(invocation.Config.KeepUnsafeCapabilities, wantCapabilities) {
+		t.Errorf(
+			"KeepUnsafeCapabilities = %v, want %v",
+			invocation.Config.KeepUnsafeCapabilities,
+			wantCapabilities,
+		)
 	}
 }
 

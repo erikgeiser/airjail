@@ -17,6 +17,7 @@ block:
 log: debug
 allow_unresolved_rules: true
 restrict_sockets: true
+keep_unsafe_capabilities: [CAP_SYS_ADMIN]
 `)
 
 	loaded, err := Load(path)
@@ -42,6 +43,10 @@ restrict_sockets: true
 
 	if !loaded.RestrictUnixSockets {
 		t.Error("RestrictUnixSockets = false, want true")
+	}
+
+	if len(loaded.KeepUnsafeCapabilities) != 1 || loaded.KeepUnsafeCapabilities[0] != "CAP_SYS_ADMIN" {
+		t.Errorf("KeepUnsafeCapabilities = %v", loaded.KeepUnsafeCapabilities)
 	}
 }
 

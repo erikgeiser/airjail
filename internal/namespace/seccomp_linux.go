@@ -28,17 +28,17 @@ func ExecRestricted(command []string) error {
 
 	err = seccomp.SetNoNewPrivs()
 	if err != nil {
-		return fmt.Errorf("restrict Unix sockets: set no_new_privs: %w", err)
+		return fmt.Errorf("restrict local sockets: set no_new_privs: %w", err)
 	}
 
 	err = loadNativeArchitectureGuard()
 	if err != nil {
-		return fmt.Errorf("restrict Unix sockets: %w", err)
+		return fmt.Errorf("restrict local sockets: %w", err)
 	}
 
-	err = seccomp.LoadFilter(unixSocketFilter())
+	err = seccomp.LoadFilter(restrictedSocketFilter())
 	if err != nil {
-		return fmt.Errorf("restrict Unix sockets: %w", err)
+		return fmt.Errorf("restrict local sockets: %w", err)
 	}
 
 	err = unix.Exec(path, command, os.Environ())
@@ -49,7 +49,7 @@ func ExecRestricted(command []string) error {
 	return nil
 }
 
-func unixSocketFilter() seccomp.Filter {
+func restrictedSocketFilter() seccomp.Filter {
 	blockedSyscalls := []string{
 		// io_uring can create sockets without invoking the socket syscall.
 		"io_uring_setup",
@@ -60,7 +60,18 @@ func unixSocketFilter() seccomp.Filter {
 		blockedSyscalls = append(blockedSyscalls, "socketcall")
 	}
 
-	unixFamily := uint64(unix.AF_UNIX)
+	restrictedSocketConditions := make([]seccomp.NameWithConditions, 0, 4)
+
+	for _, syscallName := range []string{"socket", "socketpair"} {
+		for _, family := range []uint64{unix.AF_UNIX, unix.AF_VSOCK} {
+			restrictedSocketConditions = append(restrictedSocketConditions, seccomp.NameWithConditions{
+				Name: syscallName,
+				Conditions: seccomp.ArgumentConditions{
+					{Argument: 0, Operation: seccomp.Equal, Value: family},
+				},
+			})
+		}
+	}
 
 	return seccomp.Filter{
 		NoNewPrivs: false,
@@ -69,22 +80,9 @@ func unixSocketFilter() seccomp.Filter {
 			DefaultAction: seccomp.ActionAllow,
 			Syscalls: []seccomp.SyscallGroup{
 				{
-					Action: seccomp.ActionErrno,
-					Names:  blockedSyscalls,
-					NamesWithCondtions: []seccomp.NameWithConditions{
-						{
-							Name: "socket",
-							Conditions: seccomp.ArgumentConditions{
-								{Argument: 0, Operation: seccomp.Equal, Value: unixFamily},
-							},
-						},
-						{
-							Name: "socketpair",
-							Conditions: seccomp.ArgumentConditions{
-								{Argument: 0, Operation: seccomp.Equal, Value: unixFamily},
-							},
-						},
-					},
+					Action:             seccomp.ActionErrno,
+					Names:              blockedSyscalls,
+					NamesWithCondtions: restrictedSocketConditions,
 				},
 			},
 		},

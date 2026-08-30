@@ -13,11 +13,12 @@ import (
 
 // Config is the effective user configuration.
 type Config struct {
-	Allow                []string `yaml:"allow"`
-	Block                []string `yaml:"block"`
-	Log                  string   `yaml:"log"`
-	RestrictUnixSockets  bool     `yaml:"restrict_sockets"`
-	AllowUnresolvedRules bool     `yaml:"allow_unresolved_rules"`
+	Allow                  []string `yaml:"allow"`
+	Block                  []string `yaml:"block"`
+	Log                    string   `yaml:"log"`
+	RestrictUnixSockets    bool     `yaml:"restrict_sockets"`
+	AllowUnresolvedRules   bool     `yaml:"allow_unresolved_rules"`
+	KeepUnsafeCapabilities []string `yaml:"keep_unsafe_capabilities"`
 }
 
 // Load reads a strict YAML configuration file.

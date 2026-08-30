@@ -81,13 +81,14 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 		logger.Infof("empty policy: starting child in loopback-only namespace without proxies")
 
 		return namespace.Run(ctx, namespace.ParentOptions{
-			Executable:          executable,
-			Command:             invocation.Command,
-			Environment:         environment,
-			Directory:           workingDirectory,
-			Mode:                namespaceMode,
-			RestrictUnixSockets: invocation.Config.RestrictUnixSockets,
-			Logger:              logger,
+			Executable:             executable,
+			Command:                invocation.Command,
+			Environment:            environment,
+			Directory:              workingDirectory,
+			Mode:                   namespaceMode,
+			RestrictUnixSockets:    invocation.Config.RestrictUnixSockets,
+			KeepUnsafeCapabilities: invocation.Config.KeepUnsafeCapabilities,
+			Logger:                 logger,
 		})
 	}
 
@@ -100,6 +101,7 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 		networkPolicy,
 		namespaceMode,
 		invocation.Config.RestrictUnixSockets,
+		invocation.Config.KeepUnsafeCapabilities,
 		logger,
 	)
 }
@@ -113,6 +115,7 @@ func runWithProxies(
 	networkPolicy *policy.Policy,
 	namespaceMode namespace.Mode,
 	restrictUnixSockets bool,
+	keepUnsafeCapabilities []string,
 	logger *logging.Logger,
 ) (int, error) {
 	runDir, err := createRuntimeDir(os.Getuid(), os.Getenv("XDG_RUNTIME_DIR"))
@@ -205,15 +208,16 @@ func runWithProxies(
 
 	go func() {
 		exitCode, runErr := namespace.Run(ctx, namespace.ParentOptions{
-			Executable:          executable,
-			Command:             command,
-			Environment:         environment,
-			Directory:           workingDirectory,
-			HTTPSocket:          runDir.HTTPSocket,
-			SOCKSocket:          runDir.SOCKSocket,
-			Mode:                namespaceMode,
-			RestrictUnixSockets: restrictUnixSockets,
-			Logger:              logger,
+			Executable:             executable,
+			Command:                command,
+			Environment:            environment,
+			Directory:              workingDirectory,
+			HTTPSocket:             runDir.HTTPSocket,
+			SOCKSocket:             runDir.SOCKSocket,
+			Mode:                   namespaceMode,
+			RestrictUnixSockets:    restrictUnixSockets,
+			KeepUnsafeCapabilities: keepUnsafeCapabilities,
+			Logger:                 logger,
 		})
 		commandResults <- commandResult{exitCode: exitCode, err: runErr}
 	}()

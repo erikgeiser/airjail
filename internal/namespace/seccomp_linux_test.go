@@ -52,7 +52,7 @@ func TestNativeArchitectureGuard(t *testing.T) {
 	}
 }
 
-func TestExecRestrictedBlocksUnixSockets(t *testing.T) {
+func TestExecRestrictedBlocksLocalSockets(t *testing.T) {
 	t.Parallel()
 
 	command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestExecRestrictedProcess$")
@@ -77,6 +77,7 @@ func TestExecRestrictedProcess(t *testing.T) {
 		os.Exit(2)
 	case "check":
 		assertSocketDenied(unix.AF_UNIX, unix.SOCK_STREAM)
+		assertSocketDenied(unix.AF_VSOCK, unix.SOCK_STREAM)
 		assertSocketPairDenied()
 		assertIOUringDenied()
 		assertINETSocketAllowed()
@@ -92,12 +93,12 @@ func assertSocketDenied(domain, socketType int) {
 	if fileDescriptor >= 0 {
 		_ = unix.Close(fileDescriptor)
 
-		fmt.Fprintln(os.Stderr, "Unix socket creation unexpectedly succeeded")
+		fmt.Fprintf(os.Stderr, "socket creation for family %d unexpectedly succeeded\n", domain)
 		os.Exit(2)
 	}
 
 	if !errors.Is(err, unix.EPERM) {
-		fmt.Fprintf(os.Stderr, "Unix socket error = %v, want EPERM\n", err)
+		fmt.Fprintf(os.Stderr, "socket error for family %d = %v, want EPERM\n", domain, err)
 		os.Exit(2)
 	}
 }

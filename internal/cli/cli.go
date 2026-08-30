@@ -17,6 +17,7 @@ const (
 	SupervisorSOCKSSocketOption         = "socks-socket"
 	SupervisorPreservePermissionsOption = "preserve-permissions"
 	SupervisorRestrictSocketsOption     = "restrict-unix-sockets"
+	SupervisorKeepUnsafeCapability      = "keep-unsafe-capability"
 	SupervisorLogLevel                  = "log-level"
 )
 
@@ -29,13 +30,14 @@ type Invocation struct {
 }
 
 type flagValues struct {
-	configPath          string
-	allowRules          []string
-	blockRules          []string
-	logLevel            string
-	allowUnresolved     bool
-	restrictUnixSockets bool
-	version             bool
+	configPath             string
+	allowRules             []string
+	blockRules             []string
+	logLevel               string
+	allowUnresolved        bool
+	restrictUnixSockets    bool
+	keepUnsafeCapabilities []string
+	version                bool
 }
 
 func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
@@ -50,7 +52,9 @@ func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
 	flags.BoolVar(&values.allowUnresolved, "allow-unresolved-rules", false,
 		"Do not fail when destination hostname does not resolve")
 	flags.BoolVar(&values.restrictUnixSockets, "restrict-sockets", false,
-		"Restrict connection to unix domain sockets")
+		"Restrict creation of Unix and vsock sockets")
+	flags.StringArrayVar(&values.keepUnsafeCapabilities, "keep-unsafe-capability", nil,
+		"Preserve an otherwise dropped dangerous `capability` (repeatable)")
 	flags.BoolVar(&values.version, "version", false, "Print version and exit")
 
 	return flags
@@ -97,6 +101,11 @@ func Parse(args []string) (Invocation, error) {
 	effective.Allow = append(effective.Allow, values.allowRules...)
 
 	effective.Block = append(effective.Block, values.blockRules...)
+
+	effective.KeepUnsafeCapabilities = append(
+		effective.KeepUnsafeCapabilities,
+		values.keepUnsafeCapabilities...,
+	)
 
 	if flags.Changed("log") || effective.Log == "" {
 		effective.Log = values.logLevel

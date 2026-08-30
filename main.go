@@ -29,6 +29,11 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) (int, error) {
+	err := namespace.SetNonDumpable()
+	if err != nil {
+		return 0, err
+	}
+
 	if len(args) > 0 {
 		switch args[0] {
 		case cli.SupervisorCommand:
@@ -47,11 +52,12 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 	flags.SetOutput(io.Discard)
 
 	var (
-		httpSocket          string
-		socksSocket         string
-		logLevel            string
-		preservePermissions bool
-		restrictUnixSockets bool
+		httpSocket             string
+		socksSocket            string
+		logLevel               string
+		preservePermissions    bool
+		restrictUnixSockets    bool
+		keepUnsafeCapabilities []string
 	)
 
 	flags.StringVar(&httpSocket, cli.SupervisorHTTPSocketOption, "", "outer HTTP proxy socket")
@@ -67,7 +73,13 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		&restrictUnixSockets,
 		cli.SupervisorRestrictSocketsOption,
 		false,
-		"restrict child Unix sockets",
+		"restrict child local sockets",
+	)
+	flags.StringArrayVar(
+		&keepUnsafeCapabilities,
+		cli.SupervisorKeepUnsafeCapability,
+		nil,
+		"dangerous capability to preserve",
 	)
 
 	err := flags.Parse(args)
@@ -91,13 +103,14 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 	}
 
 	return namespace.RunSupervisor(ctx, namespace.SupervisorOptions{
-		Command:             command,
-		Environment:         os.Environ(),
-		Directory:           workingDirectory,
-		HTTPSocket:          httpSocket,
-		SOCKSocket:          socksSocket,
-		PreservePermissions: preservePermissions,
-		RestrictUnixSockets: restrictUnixSockets,
-		Logger:              logger,
+		Command:                command,
+		Environment:            os.Environ(),
+		Directory:              workingDirectory,
+		HTTPSocket:             httpSocket,
+		SOCKSocket:             socksSocket,
+		PreservePermissions:    preservePermissions,
+		RestrictUnixSockets:    restrictUnixSockets,
+		KeepUnsafeCapabilities: keepUnsafeCapabilities,
+		Logger:                 logger,
 	})
 }
