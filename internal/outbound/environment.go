@@ -67,9 +67,10 @@ func (router *EnvironmentRouter) Dial(
 	address netip.Addr,
 	port uint16,
 ) (net.Conn, error) {
-	if address.Zone() != "" {
+	if address.Zone() != "" || address.WithZone("").IsLoopback() {
 		// IPv6 zones name interfaces on this host and cannot be delegated to an
-		// upstream proxy running in a different network context.
+		// upstream proxy running in a different network context. Loopback must
+		// always refer to the outer airjail namespace rather than the proxy host.
 		return router.dialer.DialContext(
 			ctx,
 			"tcp",

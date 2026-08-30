@@ -19,6 +19,7 @@ const (
 	SupervisorRestrictSocketsOption     = "restrict-unix-sockets"
 	SupervisorKeepUnsafeCapability      = "keep-unsafe-capability"
 	SupervisorManageForegroundOption    = "manage-foreground"
+	SupervisorTransparentTCPOption      = "transparent-tcp"
 	SupervisorLogLevel                  = "log-level"
 )
 

@@ -61,13 +61,13 @@ func (f *forwarder) Serve(ctx context.Context, listener net.Listener) error {
 			return fmt.Errorf("accept bridge connection: %w", err)
 		}
 
-		f.waitGroup.Add(1)
-		go f.forward(ctx, client)
+		f.waitGroup.Go(func() {
+			f.forward(ctx, client)
+		})
 	}
 }
 
 func (f *forwarder) forward(ctx context.Context, client net.Conn) {
-	defer f.waitGroup.Done()
 	defer func() { _ = client.Close() }()
 
 	outer, err := (&net.Dialer{}).DialContext(ctx, "unix", f.socketPath)

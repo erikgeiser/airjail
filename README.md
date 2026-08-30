@@ -163,15 +163,14 @@ namespace. If this is the case, the `uid` and `gid` is mapped in order to
 preserve user and group permissions, but permissions from supplementary groups
 are lost. If `airjail` is invoked without any configuration, this is all it
 does. However, if rules are present, it creates a SOCKS and an HTTP/HTTPS proxy
-outside of the namespace that each listen on a Unix domain socket that only
-proxy allowed traffic. Inside of the namespace, two TCP listeners are created,
-that forward incoming traffic through the Unix domain socket to aforementioned
-proxies. Then, the program is started with proxy environment variables to make
-it aware of the proxies. Therefore, `airjail` only allows outbound traffic for
-proxy aware programs. Another limitation is that the program is not able to
-perform DNS queries as hostnames are only resolved through the proxies. However,
-these limitations are surprisingly less of an issue that expected in practice.
-Support for non-proxy-aware programs is still planned (see roadmap).
+outside of the namespace that each listen on a Unix domain socket and only proxy
+allowed traffic. Inside the namespace, TCP listeners forward proxy-aware traffic
+to those sockets. nftables redirects other TCP connections to a transparent
+listener, which obtains the original destination and connects to it through the
+same policy-enforcing SOCKS server. Proxy environment variables continue to let
+proxy-aware programs provide destination hostnames directly. Non-proxy-aware
+programs can currently use transparent TCP with IP and CIDR policy, but cannot
+perform DNS queries until controlled DNS forwarding is implemented.
 
 The opt-in feature to restrict local sockets loads `seccomp` `BPF` rules that
 are assembled in pure Go. These rules restrict access to the syscalls `socket`
@@ -249,13 +248,9 @@ isolation may still be desired in order to avoid the following issues:
 
 ## Roadmap and Missing Features
 
-- **DNS, UDP and non-proxy-aware TCP traffic:** Currently, `airjail` allows
-  outbound traffic through the SOCKS5 and HTTP/HTTPS proxies. It is planned to
-  generalize outbound traffic to allow DNS, UDP and non-proxy-aware TCP traffic.
-  This will be achieved using in-namespace `nftables` rules that redirect the
-  remaining traffic to a listener that asks the kernel for the original
-  destination and routes the traffic through the SOCKS5 server, using ASSOCIATE
-  for UDP traffic.
+- **DNS and UDP traffic:** Controlled, policy-filtered DNS will allow
+  non-proxy-aware programs to resolve permitted hostnames. Arbitrary UDP and
+  upstream SOCKS5 UDP ASSOCIATE support are planned afterwards.
 - **Inbound Traffic:** Currently `airjail` prevents other processes from
   accessing ports opened by the sandboxed process. An `--expose` option is
   planned that forwards out-of-namespace traffic into the sandbox.
