@@ -16,8 +16,13 @@ import (
 )
 
 const (
-	HTTPAddress = "127.0.0.1:19080"
-	SOCKAddress = "127.0.0.1:19081"
+	internalIPv4Address       = "127.97.105.114"
+	internalIPv6Address       = "fd61:6972:6a61:696c::1"
+	HTTPAddress               = internalIPv4Address + ":19080"
+	SOCKAddress               = internalIPv4Address + ":19081"
+	transparentTCPIPv4Address = internalIPv4Address + ":19082"
+	transparentTCPIPv6Address = "[" + internalIPv6Address + "]:19082"
+	transparentTCPPort        = 19082
 )
 
 // Mode describes how airjail obtains and preserves namespace privileges.
@@ -67,6 +72,7 @@ type ParentOptions struct {
 	Mode                   Mode
 	RestrictUnixSockets    bool
 	KeepUnsafeCapabilities []string
+	TransparentTCP         bool
 	Logger                 *logging.Logger
 }
 
@@ -96,6 +102,10 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 
 	for _, capability := range keptCapabilities {
 		arguments = append(arguments, "--"+cli.SupervisorKeepUnsafeCapability, capability)
+	}
+
+	if options.TransparentTCP {
+		arguments = append(arguments, "--"+cli.SupervisorTransparentTCPOption)
 	}
 
 	arguments = append(arguments, "--"+cli.SupervisorLogLevel, options.Logger.LevelName())
@@ -131,9 +141,13 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 	return exitCode, nil
 }
 
+type innerServer interface {
+	Serve(ctx context.Context, listener net.Listener) error
+}
+
 type bridgeServer struct {
-	listener  net.Listener
-	forwarder *forwarder
+	listener net.Listener
+	server   innerServer
 }
 
 func namespaceProcessAttributes(mode Mode) *syscall.SysProcAttr {
@@ -167,6 +181,7 @@ type SupervisorOptions struct {
 	PreservePermissions    bool
 	RestrictUnixSockets    bool
 	KeepUnsafeCapabilities []string
+	TransparentTCP         bool
 	Logger                 *logging.Logger
 }
 
@@ -188,10 +203,26 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 		return 0, err
 	}
 
+	if options.TransparentTCP {
+		if options.SOCKSocket == "" {
+			return 0, fmt.Errorf("transparent TCP requires an outer SOCKS socket")
+		}
+
+		err = configureTransparentRoutes()
+		if err != nil {
+			return 0, err
+		}
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	servers := make([]bridgeServer, 0, 2)
+	serverCapacity := 2
+	if options.TransparentTCP {
+		serverCapacity += 2
+	}
+
+	servers := make([]bridgeServer, 0, serverCapacity)
 
 	listenConfig := net.ListenConfig{}
 	if options.HTTPSocket != "" {
@@ -200,7 +231,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			return 0, fmt.Errorf("listen on inner HTTP proxy %s: %w", HTTPAddress, err)
 		}
 
-		servers = append(servers, bridgeServer{listener: listener, forwarder: newForwarder(options.HTTPSocket)})
+		servers = append(servers, bridgeServer{listener: listener, server: newForwarder(options.HTTPSocket)})
 	}
 
 	if options.SOCKSocket != "" {
@@ -211,7 +242,42 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			return 0, fmt.Errorf("listen on inner SOCKS proxy %s: %w", SOCKAddress, err)
 		}
 
-		servers = append(servers, bridgeServer{listener: listener, forwarder: newForwarder(options.SOCKSocket)})
+		servers = append(servers, bridgeServer{listener: listener, server: newForwarder(options.SOCKSocket)})
+	}
+
+	if options.TransparentTCP {
+		for _, endpoint := range []struct {
+			network string
+			address string
+		}{
+			{network: "tcp4", address: transparentTCPIPv4Address},
+			{network: "tcp6", address: transparentTCPIPv6Address},
+		} {
+			listener, err := listenConfig.Listen(ctx, endpoint.network, endpoint.address)
+			if err != nil {
+				closeBridgeListeners(servers)
+
+				return 0, fmt.Errorf("listen on inner transparent TCP gateway %s: %w", endpoint.address, err)
+			}
+
+			transparentServer, err := newTransparentTCPForwarder(options.SOCKSocket, options.Logger)
+			if err != nil {
+				_ = listener.Close()
+
+				closeBridgeListeners(servers)
+
+				return 0, err
+			}
+
+			servers = append(servers, bridgeServer{listener: listener, server: transparentServer})
+		}
+
+		err = installTransparentTCPRules()
+		if err != nil {
+			closeBridgeListeners(servers)
+
+			return 0, err
+		}
 	}
 
 	// Adopt orphaned command descendants so airjail can reap them instead of
@@ -251,7 +317,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 	group, groupCtx := errgroup.WithContext(ctx)
 	for _, server := range servers {
 		group.Go(func() error {
-			err := server.forwarder.Serve(groupCtx, server.listener)
+			err := server.server.Serve(groupCtx, server.listener)
 			if err != nil {
 				return err
 			}

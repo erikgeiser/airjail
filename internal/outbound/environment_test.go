@@ -146,6 +146,44 @@ func TestEnvironmentRouterHonorsNoProxy(t *testing.T) {
 	_ = serverConnection.Close()
 }
 
+func TestEnvironmentRouterAlwaysDialsLoopbackDirectly(t *testing.T) {
+	t.Parallel()
+
+	target := listenTCP(t)
+	accepted := make(chan net.Conn, 1)
+
+	go func() {
+		connection, err := target.Accept()
+		if err == nil {
+			accepted <- connection
+		}
+	}()
+
+	tcpAddress, ok := target.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address has type %T, want *net.TCPAddr", target.Addr())
+	}
+
+	router, err := NewEnvironmentRouter([]string{"HTTPS_PROXY=http://127.0.0.1:1"})
+	if err != nil {
+		t.Fatalf("NewEnvironmentRouter: %v", err)
+	}
+
+	connection, err := router.Dial(
+		context.Background(),
+		"",
+		netip.MustParseAddr("127.0.0.1"),
+		uint16(tcpAddress.Port),
+	)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = connection.Close() }()
+
+	serverConnection := <-accepted
+	_ = serverConnection.Close()
+}
+
 func TestEnvironmentRouterRejectsMalformedProxyURL(t *testing.T) {
 	t.Parallel()
 

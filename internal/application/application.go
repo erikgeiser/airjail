@@ -196,17 +196,12 @@ func runWithProxies(
 
 	var waitGroup sync.WaitGroup
 
-	waitGroup.Add(2)
-	go func() {
-		defer waitGroup.Done()
-
+	waitGroup.Go(func() {
 		serverErrors <- httpServer.Serve(ctx, httpListener)
-	}()
-	go func() {
-		defer waitGroup.Done()
-
+	})
+	waitGroup.Go(func() {
 		serverErrors <- socksServer.Serve(ctx, socksListener)
-	}()
+	})
 
 	type commandResult struct {
 		exitCode int
@@ -226,6 +221,7 @@ func runWithProxies(
 			Mode:                   namespaceMode,
 			RestrictUnixSockets:    restrictUnixSockets,
 			KeepUnsafeCapabilities: keepUnsafeCapabilities,
+			TransparentTCP:         true,
 			Logger:                 logger,
 		})
 		commandResults <- commandResult{exitCode: exitCode, err: runErr}

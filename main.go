@@ -53,6 +53,7 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		preservePermissions    bool
 		restrictUnixSockets    bool
 		keepUnsafeCapabilities []string
+		transparentTCP         bool
 	)
 
 	flags.StringVar(&httpSocket, cli.SupervisorHTTPSocketOption, "", "outer HTTP proxy socket")
@@ -75,6 +76,12 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		cli.SupervisorKeepUnsafeCapability,
 		nil,
 		"dangerous capability to preserve",
+	)
+	flags.BoolVar(
+		&transparentTCP,
+		cli.SupervisorTransparentTCPOption,
+		false,
+		"redirect non-proxy TCP connections",
 	)
 
 	err := flags.Parse(args)
@@ -113,6 +120,7 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		PreservePermissions:    preservePermissions,
 		RestrictUnixSockets:    restrictUnixSockets,
 		KeepUnsafeCapabilities: keepUnsafeCapabilities,
+		TransparentTCP:         transparentTCP,
 		Logger:                 logger,
 	})
 }
