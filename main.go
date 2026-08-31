@@ -29,11 +29,6 @@ func main() {
 }
 
 func run(ctx context.Context, args []string) (int, error) {
-	err := namespace.SetNonDumpable()
-	if err != nil {
-		return 0, err
-	}
-
 	if len(args) > 0 {
 		switch args[0] {
 		case cli.SupervisorCommand:
@@ -87,6 +82,18 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		return 0, fmt.Errorf("parse supervisor flags: %w", err)
 	}
 
+	logger, err := logging.New(os.Stderr, logLevel, "supervisor")
+	if err != nil {
+		return 0, fmt.Errorf("setup supervisor logger: %w", err)
+	}
+
+	// Prevent a socket-restricted child from tracing the supervisor and using
+	// its unrestricted Unix socket access as a local-networking deputy.
+	err = namespace.SetNonDumpable()
+	if err != nil {
+		return 0, err
+	}
+
 	command := flags.Args()
 	if len(command) == 0 {
 		return 0, fmt.Errorf("supervisor child command is required")
@@ -95,11 +102,6 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		return 0, fmt.Errorf("get supervisor working directory: %w", err)
-	}
-
-	logger, err := logging.New(os.Stderr, logLevel, "supervisor")
-	if err != nil {
-		return 0, fmt.Errorf("setup supervisor logger: %w", err)
 	}
 
 	return namespace.RunSupervisor(ctx, namespace.SupervisorOptions{

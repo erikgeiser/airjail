@@ -61,6 +61,15 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 		return 0, err
 	}
 
+	if namespaceMode == namespace.PermissionPreservingMode {
+		// make airjail non-dumpable in rootless mode in order to prevent the
+		// child process from tracing airjail and meassing with the rules.
+		err = namespace.SetNonDumpable()
+		if err != nil {
+			return 0, err
+		}
+	}
+
 	if namespaceMode == namespace.RootlessMode {
 		logger.Infof("using rootless user and network namespaces")
 		logSupplementaryGroupLimitation(logger)
