@@ -14,7 +14,7 @@ import (
 
 	"github.com/erikgeiser/airjail/internal/outbound"
 	"github.com/erikgeiser/airjail/internal/policy"
-	"github.com/erikgeiser/airjail/internal/relay"
+	"github.com/erikgeiser/airjail/internal/stream"
 )
 
 const (
@@ -29,17 +29,15 @@ type Connector interface {
 
 // Server is an HTTP forward proxy.
 type Server struct {
-	connector Connector
-	tunnels   *connectionSet
-	handlers  *activitySet
+	connector  Connector
+	operations *stream.ConnGroup
 }
 
 // New creates an HTTP forward proxy.
 func New(connector Connector) *Server {
 	return &Server{
-		connector: connector,
-		tunnels:   newConnectionSet(),
-		handlers:  newActivitySet(),
+		connector:  connector,
+		operations: stream.NewConnGroup(),
 	}
 }
 
@@ -58,10 +56,15 @@ func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
 
 	select {
 	case err := <-serveResult:
-		server.handlers.close()
-		server.tunnels.closeAll()
-		server.handlers.wait()
-		server.tunnels.wait()
+		server.operations.Close()
+
+		closeErr := httpServer.Close()
+
+		server.operations.Wait()
+
+		if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			return fmt.Errorf("close HTTP proxy after serve stopped: %w", closeErr)
+		}
 
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
@@ -69,18 +72,16 @@ func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
 
 		return fmt.Errorf("serve HTTP proxy: %w", err)
 	case <-ctx.Done():
-		server.handlers.close()
-		server.tunnels.closeAll()
+		server.operations.Close()
 
 		closeErr := httpServer.Close()
+		err := <-serveResult
+
+		server.operations.Wait()
+
 		if closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
 			return fmt.Errorf("close HTTP proxy: %w", closeErr)
 		}
-
-		err := <-serveResult
-
-		server.handlers.wait()
-		server.tunnels.wait()
 
 		if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			return fmt.Errorf("serve HTTP proxy during shutdown: %w", err)
@@ -92,23 +93,28 @@ func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
 
 // ServeHTTP handles CONNECT and absolute-form HTTP requests.
 func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
-	if !server.handlers.add() {
+	operation, ok := server.operations.Acquire()
+	if !ok {
 		http.Error(response, "proxy is shutting down", http.StatusServiceUnavailable)
 
 		return
 	}
-	defer server.handlers.done()
+	defer operation.Done()
 
 	if request.Method == http.MethodConnect {
-		server.serveConnect(response, request)
+		server.serveConnect(response, request, operation)
 
 		return
 	}
 
-	server.servePlainHTTP(response, request)
+	server.servePlainHTTP(response, request, operation)
 }
 
-func (server *Server) serveConnect(response http.ResponseWriter, request *http.Request) {
+func (server *Server) serveConnect(
+	response http.ResponseWriter,
+	request *http.Request,
+	operation *stream.ConnScope,
+) {
 	destination, port, err := parseAuthority(request.Host)
 	if err != nil {
 		http.Error(response, "malformed CONNECT target", http.StatusBadRequest)
@@ -139,15 +145,12 @@ func (server *Server) serveConnect(response http.ResponseWriter, request *http.R
 		return
 	}
 
-	if !server.tunnels.add(client, upstream) {
-		_ = client.Close()
-		_ = upstream.Close()
-
-		return
-	}
-	defer server.tunnels.remove(client, upstream)
 	defer func() { _ = client.Close() }()
 	defer func() { _ = upstream.Close() }()
+
+	if !operation.Add(client) || !operation.Add(upstream) {
+		return
+	}
 
 	_, err = buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
 	if err != nil {
@@ -159,10 +162,14 @@ func (server *Server) serveConnect(response http.ResponseWriter, request *http.R
 		return
 	}
 
-	_ = relay.Bidirectional(request.Context(), client, buffered.Reader, upstream)
+	_ = stream.Bidirectional(request.Context(), client, buffered.Reader, upstream)
 }
 
-func (server *Server) servePlainHTTP(response http.ResponseWriter, request *http.Request) {
+func (server *Server) servePlainHTTP(
+	response http.ResponseWriter,
+	request *http.Request,
+	operation *stream.ConnScope,
+) {
 	if !request.URL.IsAbs() || request.URL.Scheme != "http" || request.URL.Host == "" || request.URL.User != nil {
 		http.Error(response, "absolute-form http URL required", http.StatusBadRequest)
 
@@ -183,6 +190,10 @@ func (server *Server) servePlainHTTP(response http.ResponseWriter, request *http
 		return
 	}
 	defer func() { _ = upstream.Close() }()
+
+	if !operation.Add(upstream) {
+		return
+	}
 
 	authority := canonicalAuthority(destination, port, request.URL.Port() != "")
 
@@ -288,117 +299,4 @@ func writeDialError(response http.ResponseWriter, err error) {
 	}
 
 	http.Error(response, "destination connection failed", http.StatusBadGateway)
-}
-
-type connectionSet struct {
-	mutex       sync.Mutex
-	condition   *sync.Cond
-	connections map[net.Conn]struct{}
-	active      int
-	closing     bool
-}
-
-func newConnectionSet() *connectionSet {
-	set := &connectionSet{connections: make(map[net.Conn]struct{})}
-	set.condition = sync.NewCond(&set.mutex)
-
-	return set
-}
-
-func (set *connectionSet) add(connections ...net.Conn) bool {
-	set.mutex.Lock()
-	defer set.mutex.Unlock()
-
-	if set.closing {
-		return false
-	}
-
-	set.active++
-	for _, connection := range connections {
-		set.connections[connection] = struct{}{}
-	}
-
-	return true
-}
-
-func (set *connectionSet) remove(connections ...net.Conn) {
-	set.mutex.Lock()
-	defer set.mutex.Unlock()
-
-	for _, connection := range connections {
-		delete(set.connections, connection)
-	}
-
-	set.active--
-	set.condition.Broadcast()
-}
-
-func (set *connectionSet) closeAll() {
-	set.mutex.Lock()
-	defer set.mutex.Unlock()
-
-	set.closing = true
-	for connection := range set.connections {
-		_ = connection.Close()
-	}
-}
-
-func (set *connectionSet) wait() {
-	set.mutex.Lock()
-	defer set.mutex.Unlock()
-
-	for set.active != 0 {
-		set.condition.Wait()
-	}
-}
-
-type activitySet struct {
-	mutex     sync.Mutex
-	condition *sync.Cond
-	active    int
-	closing   bool
-}
-
-func newActivitySet() *activitySet {
-	set := &activitySet{}
-	set.condition = sync.NewCond(&set.mutex)
-
-	return set
-}
-
-func (set *activitySet) add() bool {
-	set.mutex.Lock()
-	defer set.mutex.Unlock()
-
-	if set.closing {
-		return false
-	}
-
-	set.active++
-
-	return true
-}
-
-func (set *activitySet) done() {
-	set.mutex.Lock()
-	defer set.mutex.Unlock()
-
-	set.active--
-	set.condition.Broadcast()
-}
-
-func (set *activitySet) close() {
-	set.mutex.Lock()
-	defer set.mutex.Unlock()
-
-	set.closing = true
-}
-
-func (set *activitySet) wait() {
-	set.mutex.Lock()
-	defer set.mutex.Unlock()
-
-	for set.active != 0 {
-		set.condition.Wait()
-	}
 }

@@ -5,54 +5,34 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"sync"
 
-	"github.com/erikgeiser/airjail/internal/relay"
+	"github.com/erikgeiser/airjail/internal/stream"
 )
 
 type forwarder struct {
 	socketPath string
 
-	mutex       sync.Mutex
-	connections map[net.Conn]struct{}
-	waitGroup   sync.WaitGroup
+	connections *stream.ConnGroup
 }
 
 // newForwarder creates a TCP-to-Unix forwarder.
 func newForwarder(socketPath string) *forwarder {
 	return &forwarder{
 		socketPath:  socketPath,
-		connections: make(map[net.Conn]struct{}),
+		connections: stream.NewConnGroup(),
 	}
 }
 
 // Serve accepts connections until ctx is canceled.
 func (f *forwarder) Serve(ctx context.Context, listener net.Listener) error {
-	serveDone := make(chan struct{})
-
-	shutdownComplete := make(chan struct{})
-	go func() {
-		defer close(shutdownComplete)
-
-		select {
-		case <-ctx.Done():
-			_ = listener.Close()
-
-			f.closeAll()
-		case <-serveDone:
-		}
-	}()
-
-	defer func() {
-		close(serveDone)
-		<-shutdownComplete
-	}()
+	stopShutdown := f.connections.ShutdownOnContext(ctx, listener)
+	defer stopShutdown()
 
 	for {
 		client, err := listener.Accept()
 		if err != nil {
-			f.closeAll()
-			f.waitGroup.Wait()
+			f.connections.Close()
+			f.connections.Wait()
 
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
@@ -61,13 +41,16 @@ func (f *forwarder) Serve(ctx context.Context, listener net.Listener) error {
 			return fmt.Errorf("accept bridge connection: %w", err)
 		}
 
-		f.waitGroup.Go(func() {
-			f.forward(ctx, client)
-		})
+		started := f.connections.Go(func(scope *stream.ConnScope) {
+			f.forward(ctx, scope, client)
+		}, client)
+		if !started {
+			_ = client.Close()
+		}
 	}
 }
 
-func (f *forwarder) forward(ctx context.Context, client net.Conn) {
+func (f *forwarder) forward(ctx context.Context, scope *stream.ConnScope, client net.Conn) {
 	defer func() { _ = client.Close() }()
 
 	outer, err := (&net.Dialer{}).DialContext(ctx, "unix", f.socketPath)
@@ -76,35 +59,9 @@ func (f *forwarder) forward(ctx context.Context, client net.Conn) {
 	}
 	defer func() { _ = outer.Close() }()
 
-	f.add(client, outer)
-	defer f.remove(client, outer)
-
-	_ = relay.Bidirectional(ctx, client, client, outer)
-}
-
-func (f *forwarder) add(connections ...net.Conn) {
-	f.mutex.Lock()
-	defer f.mutex.Unlock()
-
-	for _, connection := range connections {
-		f.connections[connection] = struct{}{}
+	if !scope.Add(outer) {
+		return
 	}
-}
 
-func (f *forwarder) remove(connections ...net.Conn) {
-	f.mutex.Lock()
-	defer f.mutex.Unlock()
-
-	for _, connection := range connections {
-		delete(f.connections, connection)
-	}
-}
-
-func (f *forwarder) closeAll() {
-	f.mutex.Lock()
-	defer f.mutex.Unlock()
-
-	for connection := range f.connections {
-		_ = connection.Close()
-	}
+	_ = stream.Bidirectional(ctx, client, client, outer)
 }

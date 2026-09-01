@@ -14,6 +14,7 @@ import (
 
 	"github.com/armon/go-socks5"
 	"github.com/erikgeiser/airjail/internal/policy"
+	"github.com/erikgeiser/airjail/internal/stream"
 )
 
 const socksHandshakeTimeout = 10 * time.Second
@@ -27,11 +28,7 @@ type Connector interface {
 type Server struct {
 	backend *socks5.Server
 
-	mutex       sync.Mutex
-	condition   *sync.Cond
-	connections map[net.Conn]struct{}
-	active      int
-	closing     bool
+	connections *stream.ConnGroup
 }
 
 // New creates a SOCKS5 proxy.
@@ -69,42 +66,22 @@ func New(connector Connector) (*Server, error) {
 		return nil, fmt.Errorf("create SOCKS backend: %w", err)
 	}
 
-	server := &Server{
+	return &Server{
 		backend:     backend,
-		connections: make(map[net.Conn]struct{}),
-	}
-	server.condition = sync.NewCond(&server.mutex)
-
-	return server, nil
+		connections: stream.NewConnGroup(),
+	}, nil
 }
 
 // Serve handles SOCKS connections until ctx is canceled.
 func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
-	serveDone := make(chan struct{})
-
-	shutdownComplete := make(chan struct{})
-	go func() {
-		defer close(shutdownComplete)
-
-		select {
-		case <-ctx.Done():
-			_ = listener.Close()
-
-			server.closeAll()
-		case <-serveDone:
-		}
-	}()
-
-	defer func() {
-		close(serveDone)
-		<-shutdownComplete
-	}()
+	stopShutdown := server.connections.ShutdownOnContext(ctx, listener)
+	defer stopShutdown()
 
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
-			server.closeAll()
-			server.wait()
+			server.connections.Close()
+			server.connections.Wait()
 
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
@@ -122,59 +99,14 @@ func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
 			continue
 		}
 
-		if !server.add(wrapped) {
-			_ = wrapped.Close()
-
-			continue
-		}
-
-		go func() {
-			defer server.remove(wrapped)
+		started := server.connections.Go(func(_ *stream.ConnScope) {
+			defer func() { _ = wrapped.Close() }()
 
 			_ = server.backend.ServeConn(wrapped)
-		}()
-	}
-}
-
-func (server *Server) add(connection net.Conn) bool {
-	server.mutex.Lock()
-	defer server.mutex.Unlock()
-
-	if server.closing {
-		return false
-	}
-
-	server.active++
-	server.connections[connection] = struct{}{}
-
-	return true
-}
-
-func (server *Server) remove(connection net.Conn) {
-	server.mutex.Lock()
-	defer server.mutex.Unlock()
-
-	delete(server.connections, connection)
-	server.active--
-	server.condition.Broadcast()
-}
-
-func (server *Server) closeAll() {
-	server.mutex.Lock()
-	defer server.mutex.Unlock()
-
-	server.closing = true
-	for connection := range server.connections {
-		_ = connection.Close()
-	}
-}
-
-func (server *Server) wait() {
-	server.mutex.Lock()
-	defer server.mutex.Unlock()
-
-	for server.active != 0 {
-		server.condition.Wait()
+		}, wrapped)
+		if !started {
+			_ = wrapped.Close()
+		}
 	}
 }
 

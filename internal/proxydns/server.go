@@ -9,11 +9,11 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"sync"
 	"time"
 
 	"github.com/erikgeiser/airjail/internal/logging"
 	"github.com/erikgeiser/airjail/internal/policy"
+	"github.com/erikgeiser/airjail/internal/stream"
 	"github.com/miekg/dns"
 )
 
@@ -39,9 +39,7 @@ type Server struct {
 	logger   *logging.Logger
 	queries  chan struct{}
 
-	mutex       sync.Mutex
-	connections map[net.Conn]struct{}
-	waitGroup   sync.WaitGroup
+	connections *stream.ConnGroup
 }
 
 // New creates a DNS server.
@@ -59,37 +57,20 @@ func New(networkPolicy *policy.Policy, upstream Upstream, logger *logging.Logger
 		upstream:    upstream,
 		logger:      logger,
 		queries:     make(chan struct{}, maxConcurrentQuery),
-		connections: make(map[net.Conn]struct{}),
+		connections: stream.NewConnGroup(),
 	}, nil
 }
 
 // Serve accepts DNS-over-stream connections until ctx is canceled.
 func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
-	serveDone := make(chan struct{})
-	shutdownComplete := make(chan struct{})
-
-	go func() {
-		defer close(shutdownComplete)
-
-		select {
-		case <-ctx.Done():
-			_ = listener.Close()
-
-			server.closeAll()
-		case <-serveDone:
-		}
-	}()
-
-	defer func() {
-		close(serveDone)
-		<-shutdownComplete
-	}()
+	stopShutdown := server.connections.ShutdownOnContext(ctx, listener)
+	defer stopShutdown()
 
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
-			server.closeAll()
-			server.waitGroup.Wait()
+			server.connections.Close()
+			server.connections.Wait()
 
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
@@ -98,15 +79,16 @@ func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
 			return fmt.Errorf("accept DNS proxy connection: %w", err)
 		}
 
-		server.add(connection)
-		server.waitGroup.Go(func() {
+		started := server.connections.Go(func(_ *stream.ConnScope) {
 			server.serveConnection(ctx, connection)
-		})
+		}, connection)
+		if !started {
+			_ = connection.Close()
+		}
 	}
 }
 
 func (server *Server) serveConnection(ctx context.Context, connection net.Conn) {
-	defer server.remove(connection)
 	defer func() { _ = connection.Close() }()
 
 	for range maxQueriesPerConnection {
@@ -439,21 +421,7 @@ func readStreamMessage(connection net.Conn) ([]byte, error) {
 		return nil, fmt.Errorf("set DNS stream read deadline: %w", err)
 	}
 
-	lengthBytes := make([]byte, 2)
-
-	_, err = io.ReadFull(connection, lengthBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	length := int(binary.BigEndian.Uint16(lengthBytes))
-	if length == 0 || length > maxDNSMessageSize {
-		return nil, fmt.Errorf("DNS stream message length %d is invalid", length)
-	}
-
-	contents := make([]byte, length)
-
-	_, err = io.ReadFull(connection, contents)
+	contents, err := stream.ReadUint16Frame(connection, maxDNSMessageSize)
 	if err != nil {
 		return nil, fmt.Errorf("read DNS stream message: %w", err)
 	}
@@ -462,65 +430,17 @@ func readStreamMessage(connection net.Conn) ([]byte, error) {
 }
 
 func writeStreamMessage(connection net.Conn, contents []byte) error {
-	if len(contents) == 0 || len(contents) > maxDNSMessageSize {
-		return fmt.Errorf("DNS stream response length %d is invalid", len(contents))
-	}
-
 	err := connection.SetWriteDeadline(time.Now().Add(dnsStreamTimeout))
 	if err != nil {
 		return fmt.Errorf("set DNS stream write deadline: %w", err)
 	}
 
-	frame := make([]byte, 2, 2+len(contents))
-	binary.BigEndian.PutUint16(frame, uint16(len(contents)))
-	frame = append(frame, contents...)
-
-	err = writeAll(connection, frame)
+	err = stream.WriteUint16Frame(connection, contents)
 	if err != nil {
 		return fmt.Errorf("write DNS stream message: %w", err)
 	}
 
 	return nil
-}
-
-func writeAll(writer io.Writer, contents []byte) error {
-	for len(contents) != 0 {
-		written, err := writer.Write(contents)
-		if err != nil {
-			return err
-		}
-
-		if written == 0 {
-			return io.ErrShortWrite
-		}
-
-		contents = contents[written:]
-	}
-
-	return nil
-}
-
-func (server *Server) add(connection net.Conn) {
-	server.mutex.Lock()
-	defer server.mutex.Unlock()
-
-	server.connections[connection] = struct{}{}
-}
-
-func (server *Server) remove(connection net.Conn) {
-	server.mutex.Lock()
-	defer server.mutex.Unlock()
-
-	delete(server.connections, connection)
-}
-
-func (server *Server) closeAll() {
-	server.mutex.Lock()
-	defer server.mutex.Unlock()
-
-	for connection := range server.connections {
-		_ = connection.Close()
-	}
 }
 
 func slicesContains(values []string, value string) bool {

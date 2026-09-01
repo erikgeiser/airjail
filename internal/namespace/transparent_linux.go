@@ -7,11 +7,10 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sync"
 	"unsafe"
 
 	"github.com/erikgeiser/airjail/internal/logging"
-	"github.com/erikgeiser/airjail/internal/relay"
+	"github.com/erikgeiser/airjail/internal/stream"
 	xproxy "golang.org/x/net/proxy"
 	"golang.org/x/sys/unix"
 )
@@ -21,9 +20,7 @@ type transparentTCPForwarder struct {
 	dnsSocket string
 	logger    *logging.Logger
 
-	mutex       sync.Mutex
-	connections map[net.Conn]struct{}
-	waitGroup   sync.WaitGroup
+	connections *stream.ConnGroup
 }
 
 func newTransparentTCPForwarder(socketPath, dnsSocketPath string, logger *logging.Logger) (*transparentTCPForwarder, error) {
@@ -41,36 +38,19 @@ func newTransparentTCPForwarder(socketPath, dnsSocketPath string, logger *loggin
 		dialer:      dialer,
 		dnsSocket:   dnsSocketPath,
 		logger:      logger,
-		connections: make(map[net.Conn]struct{}),
+		connections: stream.NewConnGroup(),
 	}, nil
 }
 
 func (forwarder *transparentTCPForwarder) Serve(ctx context.Context, listener net.Listener) error {
-	serveDone := make(chan struct{})
-	shutdownComplete := make(chan struct{})
-
-	go func() {
-		defer close(shutdownComplete)
-
-		select {
-		case <-ctx.Done():
-			_ = listener.Close()
-
-			forwarder.closeAll()
-		case <-serveDone:
-		}
-	}()
-
-	defer func() {
-		close(serveDone)
-		<-shutdownComplete
-	}()
+	stopShutdown := forwarder.connections.ShutdownOnContext(ctx, listener)
+	defer stopShutdown()
 
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
-			forwarder.closeAll()
-			forwarder.waitGroup.Wait()
+			forwarder.connections.Close()
+			forwarder.connections.Wait()
 
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
@@ -79,15 +59,20 @@ func (forwarder *transparentTCPForwarder) Serve(ctx context.Context, listener ne
 			return fmt.Errorf("accept transparent TCP connection: %w", err)
 		}
 
-		forwarder.add(connection)
-		forwarder.waitGroup.Go(func() {
-			forwarder.forward(ctx, connection)
-		})
+		started := forwarder.connections.Go(func(scope *stream.ConnScope) {
+			forwarder.forward(ctx, scope, connection)
+		}, connection)
+		if !started {
+			_ = connection.Close()
+		}
 	}
 }
 
-func (forwarder *transparentTCPForwarder) forward(ctx context.Context, connection net.Conn) {
-	defer forwarder.remove(connection)
+func (forwarder *transparentTCPForwarder) forward(
+	ctx context.Context,
+	scope *stream.ConnScope,
+	connection net.Conn,
+) {
 	defer func() { _ = connection.Close() }()
 
 	tcpConnection, ok := connection.(*net.TCPConn)
@@ -125,39 +110,13 @@ func (forwarder *transparentTCPForwarder) forward(ctx context.Context, connectio
 
 	defer func() { _ = upstream.Close() }()
 
-	forwarder.add(upstream)
-	defer forwarder.remove(upstream)
+	if !scope.Add(upstream) {
+		return
+	}
 
-	err = relay.Bidirectional(ctx, connection, connection, upstream)
+	err = stream.Bidirectional(ctx, connection, connection, upstream)
 	if err != nil {
 		forwarder.logger.Debugf("relay transparent TCP destination %s: %v", destination, err)
-	}
-}
-
-func (forwarder *transparentTCPForwarder) add(connections ...net.Conn) {
-	forwarder.mutex.Lock()
-	defer forwarder.mutex.Unlock()
-
-	for _, connection := range connections {
-		forwarder.connections[connection] = struct{}{}
-	}
-}
-
-func (forwarder *transparentTCPForwarder) remove(connections ...net.Conn) {
-	forwarder.mutex.Lock()
-	defer forwarder.mutex.Unlock()
-
-	for _, connection := range connections {
-		delete(forwarder.connections, connection)
-	}
-}
-
-func (forwarder *transparentTCPForwarder) closeAll() {
-	forwarder.mutex.Lock()
-	defer forwarder.mutex.Unlock()
-
-	for connection := range forwarder.connections {
-		_ = connection.Close()
 	}
 }
 
