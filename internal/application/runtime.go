@@ -14,6 +14,7 @@ type runtimeDir struct {
 	Directory  string
 	HTTPSocket string
 	SOCKSocket string
+	DNSSocket  string
 }
 
 func createRuntimeDir(uid int, runtimeDirectory string) (*runtimeDir, error) {
@@ -45,8 +46,10 @@ func createRuntimeDir(uid int, runtimeDirectory string) (*runtimeDir, error) {
 		Directory:  directory,
 		HTTPSocket: filepath.Join(directory, "http.sock"),
 		SOCKSocket: filepath.Join(directory, "socks.sock"),
+		DNSSocket:  filepath.Join(directory, "dns.sock"),
 	}
-	if len(runDir.HTTPSocket) > maxUnixSocketPath || len(runDir.SOCKSocket) > maxUnixSocketPath {
+	if len(runDir.HTTPSocket) > maxUnixSocketPath || len(runDir.SOCKSocket) > maxUnixSocketPath ||
+		len(runDir.DNSSocket) > maxUnixSocketPath {
 		_ = os.RemoveAll(directory)
 
 		return nil, fmt.Errorf("session socket path exceeds Linux Unix socket path limit under %q", base)

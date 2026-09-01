@@ -35,12 +35,14 @@ func configureTransparentRoutes() error {
 		{
 			LinkIndex: loopback.Attrs().Index,
 			Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
-			Scope:     netlink.SCOPE_LINK,
+			Scope:     netlink.SCOPE_HOST,
+			Type:      unix.RTN_LOCAL,
 		},
 		{
 			LinkIndex: loopback.Attrs().Index,
 			Dst:       &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
-			Scope:     netlink.SCOPE_LINK,
+			Scope:     netlink.SCOPE_HOST,
+			Type:      unix.RTN_LOCAL,
 		},
 	}
 
@@ -54,7 +56,7 @@ func configureTransparentRoutes() error {
 	return nil
 }
 
-func installTransparentTCPRules() error {
+func installTransparentRules() error {
 	connection, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("open nftables connection: %w", err)
@@ -66,7 +68,7 @@ func installTransparentTCPRules() error {
 		netip.MustParseAddr(internalIPv4Address),
 		unix.NFPROTO_IPV4,
 		16,
-		[]uint16{19080, 19081, transparentTCPPort},
+		[]uint16{19080, 19081, transparentTCPPort, dnsPort},
 	)
 	addTransparentTable(
 		connection,
@@ -74,12 +76,12 @@ func installTransparentTCPRules() error {
 		netip.MustParseAddr(internalIPv6Address),
 		unix.NFPROTO_IPV6,
 		24,
-		[]uint16{transparentTCPPort},
+		[]uint16{transparentTCPPort, dnsPort},
 	)
 
 	err = connection.Flush()
 	if err != nil {
-		return fmt.Errorf("install transparent TCP nftables rules: %w", err)
+		return fmt.Errorf("install transparent nftables rules: %w", err)
 	}
 
 	return nil
@@ -101,6 +103,13 @@ func addTransparentTable(
 		Priority: nftables.ChainPriorityNATDest,
 		Type:     nftables.ChainTypeNAT,
 	})
+	preroutingChain := connection.AddChain(&nftables.Chain{
+		Name:     "prerouting",
+		Table:    table,
+		Hooknum:  nftables.ChainHookPrerouting,
+		Priority: nftables.ChainPriorityMangle,
+		Type:     nftables.ChainTypeFilter,
+	})
 
 	for _, port := range exemptPorts {
 		connection.AddRule(&nftables.Rule{
@@ -112,6 +121,12 @@ func addTransparentTable(
 			),
 		})
 	}
+
+	connection.AddRule(&nftables.Rule{
+		Table: table,
+		Chain: preroutingChain,
+		Exprs: transparentDNSUDPExpressions(family),
+	})
 
 	connection.AddRule(&nftables.Rule{
 		Table: table,
@@ -129,6 +144,26 @@ func addTransparentTable(
 			},
 		},
 	})
+}
+
+func transparentDNSUDPExpressions(family nftables.TableFamily) []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_UDP}},
+		&expr.Payload{
+			DestRegister: 1,
+			Base:         expr.PayloadBaseTransportHeader,
+			Offset:       2,
+			Len:          2,
+		},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(53)},
+		&expr.Immediate{Register: 1, Data: binaryutil.BigEndian.PutUint16(dnsPort)},
+		&expr.TProxy{
+			Family:      byte(family),
+			TableFamily: byte(family),
+			RegPort:     1,
+		},
+	}
 }
 
 func matchTCPDestination(address netip.Addr, destinationOffset uint32, port uint16) []expr.Any {

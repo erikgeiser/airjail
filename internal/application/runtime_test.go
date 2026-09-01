@@ -24,6 +24,10 @@ func TestCreateAndClose(t *testing.T) {
 		t.Errorf("SOCKS socket = %q, not inside session", created.SOCKSocket)
 	}
 
+	if filepath.Dir(created.DNSSocket) != created.Directory {
+		t.Errorf("DNS socket = %q, not inside session", created.DNSSocket)
+	}
+
 	info, err := os.Stat(created.Directory)
 	if err != nil {
 		t.Fatalf("stat session: %v", err)
