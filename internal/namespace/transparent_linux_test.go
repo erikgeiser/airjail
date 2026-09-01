@@ -77,7 +77,9 @@ func TestInternalEndpoints(t *testing.T) {
 		{destination: "127.97.105.114:19080", want: true},
 		{destination: "127.97.105.114:19081", want: true},
 		{destination: "127.97.105.114:19082", want: true},
+		{destination: "127.97.105.114:19053", want: true},
 		{destination: "[fd61:6972:6a61:696c::1]:19082", want: true},
+		{destination: "[fd61:6972:6a61:696c::1]:19053", want: true},
 		{destination: "127.0.0.1:19080"},
 		{destination: "127.97.105.114:443"},
 	}

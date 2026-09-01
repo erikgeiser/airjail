@@ -168,9 +168,10 @@ allowed traffic. Inside the namespace, TCP listeners forward proxy-aware traffic
 to those sockets. nftables redirects other TCP connections to a transparent
 listener, which obtains the original destination and connects to it through the
 same policy-enforcing SOCKS server. Proxy environment variables continue to let
-proxy-aware programs provide destination hostnames directly. Non-proxy-aware
-programs can currently use transparent TCP with IP and CIDR policy, but cannot
-perform DNS queries until controlled DNS forwarding is implemented.
+proxy-aware programs provide destination hostnames directly. For non-proxy-aware
+programs, nftables redirects DNS over TCP and UDP to a filtered outer resolver.
+Approved A and AAAA responses temporarily associate their addresses with matching
+hostname rules before transparent TCP connections are permitted.
 
 The opt-in feature to restrict local sockets loads `seccomp` `BPF` rules that
 are assembled in pure Go. These rules restrict access to the syscalls `socket`
@@ -248,9 +249,9 @@ isolation may still be desired in order to avoid the following issues:
 
 ## Roadmap and Missing Features
 
-- **DNS and UDP traffic:** Controlled, policy-filtered DNS will allow
-  non-proxy-aware programs to resolve permitted hostnames. Arbitrary UDP and
-  upstream SOCKS5 UDP ASSOCIATE support are planned afterwards.
+- **Additional DNS and UDP support:** Filtered DNS currently supports A and
+  AAAA queries with CNAME chains. HTTPS/SVCB records for ECH, arbitrary UDP,
+  and upstream SOCKS5 UDP ASSOCIATE support are planned afterwards.
 - **Inbound Traffic:** Currently `airjail` prevents other processes from
   accessing ports opened by the sandboxed process. An `--expose` option is
   planned that forwards out-of-namespace traffic into the sandbox.

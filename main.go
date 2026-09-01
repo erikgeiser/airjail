@@ -49,6 +49,7 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 	var (
 		httpSocket             string
 		socksSocket            string
+		dnsSocket              string
 		logLevel               string
 		preservePermissions    bool
 		restrictUnixSockets    bool
@@ -58,6 +59,7 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 
 	flags.StringVar(&httpSocket, cli.SupervisorHTTPSocketOption, "", "outer HTTP proxy socket")
 	flags.StringVar(&socksSocket, cli.SupervisorSOCKSSocketOption, "", "outer SOCKS proxy socket")
+	flags.StringVar(&dnsSocket, cli.SupervisorDNSSocketOption, "", "outer DNS proxy socket")
 	flags.StringVar(&logLevel, cli.SupervisorLogLevel, "warning", "log level")
 	flags.BoolVar(
 		&preservePermissions,
@@ -117,6 +119,7 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		Directory:              workingDirectory,
 		HTTPSocket:             httpSocket,
 		SOCKSocket:             socksSocket,
+		DNSSocket:              dnsSocket,
 		PreservePermissions:    preservePermissions,
 		RestrictUnixSockets:    restrictUnixSockets,
 		KeepUnsafeCapabilities: keepUnsafeCapabilities,

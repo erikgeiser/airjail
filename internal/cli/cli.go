@@ -15,6 +15,7 @@ const (
 	RestrictedExecCommand               = "__restricted-exec"
 	SupervisorHTTPSocketOption          = "http-socket"
 	SupervisorSOCKSSocketOption         = "socks-socket"
+	SupervisorDNSSocketOption           = "dns-socket"
 	SupervisorPreservePermissionsOption = "preserve-permissions"
 	SupervisorRestrictSocketsOption     = "restrict-unix-sockets"
 	SupervisorKeepUnsafeCapability      = "keep-unsafe-capability"

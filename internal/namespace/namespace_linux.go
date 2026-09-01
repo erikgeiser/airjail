@@ -22,7 +22,10 @@ const (
 	SOCKAddress               = internalIPv4Address + ":19081"
 	transparentTCPIPv4Address = internalIPv4Address + ":19082"
 	transparentTCPIPv6Address = "[" + internalIPv6Address + "]:19082"
+	DNSIPv4Address            = internalIPv4Address + ":19053"
+	DNSIPv6Address            = "[" + internalIPv6Address + "]:19053"
 	transparentTCPPort        = 19082
+	dnsPort                   = 19053
 )
 
 // Mode describes how airjail obtains and preserves namespace privileges.
@@ -69,6 +72,7 @@ type ParentOptions struct {
 	Directory              string
 	HTTPSocket             string
 	SOCKSocket             string
+	DNSSocket              string
 	Mode                   Mode
 	RestrictUnixSockets    bool
 	KeepUnsafeCapabilities []string
@@ -90,6 +94,10 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 
 	if options.SOCKSocket != "" {
 		arguments = append(arguments, "--"+cli.SupervisorSOCKSSocketOption, options.SOCKSocket)
+	}
+
+	if options.DNSSocket != "" {
+		arguments = append(arguments, "--"+cli.SupervisorDNSSocketOption, options.DNSSocket)
 	}
 
 	if options.Mode == PermissionPreservingMode {
@@ -150,6 +158,13 @@ type bridgeServer struct {
 	server   innerServer
 }
 
+type dnsPacketServer struct {
+	connection      *net.UDPConn
+	responseWriter  dnsUDPResponseWriter
+	forwarder       *dnsUDPForwarder
+	ipv6Destination bool
+}
+
 func namespaceProcessAttributes(mode Mode) *syscall.SysProcAttr {
 	if mode == PermissionPreservingMode {
 		return &syscall.SysProcAttr{
@@ -178,6 +193,7 @@ type SupervisorOptions struct {
 	Directory              string
 	HTTPSocket             string
 	SOCKSocket             string
+	DNSSocket              string
 	PreservePermissions    bool
 	RestrictUnixSockets    bool
 	KeepUnsafeCapabilities []string
@@ -187,7 +203,7 @@ type SupervisorOptions struct {
 
 // RunSupervisor configures loopback, starts bridges, and supervises the command.
 func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) {
-	for _, socketPath := range []string{options.HTTPSocket, options.SOCKSocket} {
+	for _, socketPath := range []string{options.HTTPSocket, options.SOCKSocket, options.DNSSocket} {
 		if socketPath == "" {
 			continue
 		}
@@ -208,6 +224,10 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			return 0, fmt.Errorf("transparent TCP requires an outer SOCKS socket")
 		}
 
+		if options.DNSSocket == "" {
+			return 0, fmt.Errorf("transparent TCP requires an outer DNS socket")
+		}
+
 		err = configureTransparentRoutes()
 		if err != nil {
 			return 0, err
@@ -219,10 +239,11 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 
 	serverCapacity := 2
 	if options.TransparentTCP {
-		serverCapacity += 2
+		serverCapacity += 4
 	}
 
 	servers := make([]bridgeServer, 0, serverCapacity)
+	packetServers := make([]dnsPacketServer, 0, 2)
 
 	listenConfig := net.ListenConfig{}
 	if options.HTTPSocket != "" {
@@ -246,35 +267,41 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 	}
 
 	if options.TransparentTCP {
-		for _, endpoint := range []struct {
-			network string
-			address string
-		}{
-			{network: "tcp4", address: transparentTCPIPv4Address},
-			{network: "tcp6", address: transparentTCPIPv6Address},
-		} {
-			listener, err := listenConfig.Listen(ctx, endpoint.network, endpoint.address)
-			if err != nil {
-				closeBridgeListeners(servers)
+		dnsServers, dnsPacketServers, setupErr := createDNSBridgeServers(
+			ctx,
+			&listenConfig,
+			options.DNSSocket,
+			options.Logger,
+		)
+		if setupErr != nil {
+			closeBridgeListeners(servers)
 
-				return 0, fmt.Errorf("listen on inner transparent TCP gateway %s: %w", endpoint.address, err)
-			}
-
-			transparentServer, err := newTransparentTCPForwarder(options.SOCKSocket, options.Logger)
-			if err != nil {
-				_ = listener.Close()
-
-				closeBridgeListeners(servers)
-
-				return 0, err
-			}
-
-			servers = append(servers, bridgeServer{listener: listener, server: transparentServer})
+			return 0, setupErr
 		}
 
-		err = installTransparentTCPRules()
+		servers = append(servers, dnsServers...)
+		packetServers = append(packetServers, dnsPacketServers...)
+
+		transparentServers, setupErr := createTransparentTCPServers(
+			ctx,
+			&listenConfig,
+			options.SOCKSocket,
+			options.DNSSocket,
+			options.Logger,
+		)
+		if setupErr != nil {
+			closeBridgeListeners(servers)
+			closeDNSPacketServers(packetServers)
+
+			return 0, setupErr
+		}
+
+		servers = append(servers, transparentServers...)
+
+		err = installTransparentRules()
 		if err != nil {
 			closeBridgeListeners(servers)
+			closeDNSPacketServers(packetServers)
 
 			return 0, err
 		}
@@ -285,33 +312,17 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 	err = unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
 	if err != nil {
 		closeBridgeListeners(servers)
+		closeDNSPacketServers(packetServers)
 
 		return 0, fmt.Errorf("set child subreaper: %w", err)
 	}
 
-	if options.PreservePermissions {
-		err = dropDangerousCapabilities(options.KeepUnsafeCapabilities)
-	} else {
-		err = dropSetupCapabilities()
-	}
-
+	childProcessAttributes, err := prepareChildCapabilities(options)
 	if err != nil {
 		closeBridgeListeners(servers)
+		closeDNSPacketServers(packetServers)
 
 		return 0, err
-	}
-
-	var childProcessAttributes *syscall.SysProcAttr
-
-	if options.PreservePermissions {
-		ambientCapabilities, capabilityErr := unsafeCapabilityValues(options.KeepUnsafeCapabilities)
-		if capabilityErr != nil {
-			closeBridgeListeners(servers)
-
-			return 0, capabilityErr
-		}
-
-		childProcessAttributes = &syscall.SysProcAttr{AmbientCaps: ambientCapabilities}
 	}
 
 	group, groupCtx := errgroup.WithContext(ctx)
@@ -324,6 +335,26 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 
 			if groupCtx.Err() == nil {
 				return fmt.Errorf("inner proxy bridge stopped unexpectedly")
+			}
+
+			return nil
+		})
+	}
+
+	for _, server := range packetServers {
+		group.Go(func() error {
+			err := server.forwarder.Serve(
+				groupCtx,
+				server.connection,
+				server.responseWriter,
+				server.ipv6Destination,
+			)
+			if err != nil {
+				return err
+			}
+
+			if groupCtx.Err() == nil {
+				return fmt.Errorf("inner DNS UDP bridge stopped unexpectedly")
 			}
 
 			return nil
@@ -444,8 +475,138 @@ func dropSetupCapabilities() error {
 	return nil
 }
 
+func prepareChildCapabilities(options SupervisorOptions) (*syscall.SysProcAttr, error) {
+	if !options.PreservePermissions {
+		return nil, dropSetupCapabilities()
+	}
+
+	err := dropDangerousCapabilities(options.KeepUnsafeCapabilities)
+	if err != nil {
+		return nil, err
+	}
+
+	ambientCapabilities, err := unsafeCapabilityValues(options.KeepUnsafeCapabilities)
+	if err != nil {
+		return nil, err
+	}
+
+	return &syscall.SysProcAttr{AmbientCaps: ambientCapabilities}, nil
+}
+
+func createDNSBridgeServers(
+	ctx context.Context,
+	listenConfig *net.ListenConfig,
+	socketPath string,
+	logger *logging.Logger,
+) ([]bridgeServer, []dnsPacketServer, error) {
+	servers := make([]bridgeServer, 0, 2)
+	packetServers := make([]dnsPacketServer, 0, 2)
+
+	for _, endpoint := range []struct {
+		tcpNetwork string
+		udpNetwork string
+		address    string
+		ipv6       bool
+	}{
+		{tcpNetwork: "tcp4", udpNetwork: "udp4", address: DNSIPv4Address},
+		{tcpNetwork: "tcp6", udpNetwork: "udp6", address: DNSIPv6Address, ipv6: true},
+	} {
+		listener, err := listenConfig.Listen(ctx, endpoint.tcpNetwork, endpoint.address)
+		if err != nil {
+			closeBridgeListeners(servers)
+			closeDNSPacketServers(packetServers)
+
+			return nil, nil, fmt.Errorf("listen on inner DNS TCP gateway %s: %w", endpoint.address, err)
+		}
+
+		servers = append(servers, bridgeServer{listener: listener, server: newForwarder(socketPath)})
+
+		udpConnection, err := createDNSUDPQuerySocket(ctx, endpoint.udpNetwork, endpoint.ipv6)
+		if err != nil {
+			closeBridgeListeners(servers)
+			closeDNSPacketServers(packetServers)
+
+			return nil, nil, fmt.Errorf("listen on inner DNS UDP gateway %s: %w", endpoint.address, err)
+		}
+
+		err = enableOriginalDNSDestination(udpConnection, endpoint.ipv6)
+		if err != nil {
+			_ = udpConnection.Close()
+
+			closeBridgeListeners(servers)
+			closeDNSPacketServers(packetServers)
+
+			return nil, nil, err
+		}
+
+		responseWriter, err := createDNSUDPResponseWriter(ctx, endpoint.udpNetwork, endpoint.ipv6)
+		if err != nil {
+			_ = udpConnection.Close()
+
+			closeBridgeListeners(servers)
+			closeDNSPacketServers(packetServers)
+
+			return nil, nil, err
+		}
+
+		packetServers = append(packetServers, dnsPacketServer{
+			connection:      udpConnection,
+			responseWriter:  responseWriter,
+			forwarder:       newDNSUDPForwarder(socketPath, logger),
+			ipv6Destination: endpoint.ipv6,
+		})
+	}
+
+	return servers, packetServers, nil
+}
+
+func createTransparentTCPServers(
+	ctx context.Context,
+	listenConfig *net.ListenConfig,
+	socketPath string,
+	dnsSocketPath string,
+	logger *logging.Logger,
+) ([]bridgeServer, error) {
+	servers := make([]bridgeServer, 0, 2)
+
+	for _, endpoint := range []struct {
+		network string
+		address string
+	}{
+		{network: "tcp4", address: transparentTCPIPv4Address},
+		{network: "tcp6", address: transparentTCPIPv6Address},
+	} {
+		listener, err := listenConfig.Listen(ctx, endpoint.network, endpoint.address)
+		if err != nil {
+			closeBridgeListeners(servers)
+
+			return nil, fmt.Errorf("listen on inner transparent TCP gateway %s: %w", endpoint.address, err)
+		}
+
+		transparentServer, err := newTransparentTCPForwarder(socketPath, dnsSocketPath, logger)
+		if err != nil {
+			_ = listener.Close()
+
+			closeBridgeListeners(servers)
+
+			return nil, err
+		}
+
+		servers = append(servers, bridgeServer{listener: listener, server: transparentServer})
+	}
+
+	return servers, nil
+}
+
 func closeBridgeListeners(servers []bridgeServer) {
 	for _, server := range servers {
 		_ = server.listener.Close()
+	}
+}
+
+func closeDNSPacketServers(servers []dnsPacketServer) {
+	for _, server := range servers {
+		_ = server.connection.Close()
+		_ = server.responseWriter.Close()
 	}
 }

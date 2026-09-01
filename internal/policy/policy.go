@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/erikgeiser/airjail/internal/logging"
 )
@@ -25,8 +26,9 @@ type Options struct {
 
 // Policy is an immutable, parsed egress policy.
 type Policy struct {
-	allow ruleSet
-	block ruleSet
+	allow   ruleSet
+	block   ruleSet
+	dynamic dynamicPolicy
 }
 
 // New parses rules and resolves exact hostname rules.
@@ -58,7 +60,15 @@ func New(ctx context.Context, allowRules, blockRules []string, options Options) 
 		return nil, fmt.Errorf("expand block policy: %w", err)
 	}
 
-	return &Policy{allow: allow, block: block}, nil
+	return &Policy{
+		allow: allow,
+		block: block,
+		dynamic: dynamicPolicy{
+			allow:   make(map[dynamicAddressKey]time.Time),
+			block:   make(map[dynamicAddressKey]time.Time),
+			aliases: make(map[string]map[string]time.Time),
+		},
+	}, nil
 }
 
 type lookupResult struct {
@@ -167,16 +177,12 @@ func (policy *Policy) Allows(hostname string, address netip.Addr, port uint16) (
 		address = address.Unmap()
 	}
 
-	if policy.Empty() {
-		return false, nil
-	}
+	policy.dynamic.mutex.Lock()
+	defer policy.dynamic.mutex.Unlock()
 
-	allowed := policy.allow.empty() || policy.allow.matches(hostname, address, port)
-	if !allowed {
-		return false, nil
-	}
+	policy.dynamic.removeExpired(time.Now())
 
-	return !policy.block.matches(hostname, address, port), nil
+	return policy.allowsLocked(hostname, address, port), nil
 }
 
 func (rules *ruleSet) empty() bool {

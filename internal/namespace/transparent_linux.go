@@ -17,15 +17,16 @@ import (
 )
 
 type transparentTCPForwarder struct {
-	dialer xproxy.ContextDialer
-	logger *logging.Logger
+	dialer    xproxy.ContextDialer
+	dnsSocket string
+	logger    *logging.Logger
 
 	mutex       sync.Mutex
 	connections map[net.Conn]struct{}
 	waitGroup   sync.WaitGroup
 }
 
-func newTransparentTCPForwarder(socketPath string, logger *logging.Logger) (*transparentTCPForwarder, error) {
+func newTransparentTCPForwarder(socketPath, dnsSocketPath string, logger *logging.Logger) (*transparentTCPForwarder, error) {
 	proxyDialer, err := xproxy.SOCKS5("unix", socketPath, nil, &net.Dialer{})
 	if err != nil {
 		return nil, fmt.Errorf("create internal SOCKS dialer: %w", err)
@@ -38,6 +39,7 @@ func newTransparentTCPForwarder(socketPath string, logger *logging.Logger) (*tra
 
 	return &transparentTCPForwarder{
 		dialer:      dialer,
+		dnsSocket:   dnsSocketPath,
 		logger:      logger,
 		connections: make(map[net.Conn]struct{}),
 	}, nil
@@ -108,18 +110,28 @@ func (forwarder *transparentTCPForwarder) forward(ctx context.Context, connectio
 		return
 	}
 
-	upstream, err := forwarder.dialer.DialContext(ctx, "tcp", destination.String())
+	var upstream net.Conn
+	if destination.Port() == 53 {
+		upstream, err = (&net.Dialer{}).DialContext(ctx, "unix", forwarder.dnsSocket)
+	} else {
+		upstream, err = forwarder.dialer.DialContext(ctx, "tcp", destination.String())
+	}
+
 	if err != nil {
-		forwarder.logger.Debugf("connect transparent TCP destination %s through SOCKS: %v", destination, err)
+		forwarder.logger.Debugf("connect transparent TCP destination %s: %v", destination, err)
 
 		return
 	}
+
 	defer func() { _ = upstream.Close() }()
 
 	forwarder.add(upstream)
 	defer forwarder.remove(upstream)
 
-	_ = relay.Bidirectional(ctx, connection, connection, upstream)
+	err = relay.Bidirectional(ctx, connection, connection, upstream)
+	if err != nil {
+		forwarder.logger.Debugf("relay transparent TCP destination %s: %v", destination, err)
+	}
 }
 
 func (forwarder *transparentTCPForwarder) add(connections ...net.Conn) {
@@ -271,10 +283,11 @@ func parseOriginalDestination(
 func isInternalEndpoint(destination netip.AddrPort) bool {
 	if destination.Addr() == netip.MustParseAddr(internalIPv4Address) {
 		switch destination.Port() {
-		case 19080, 19081, transparentTCPPort:
+		case 19080, 19081, transparentTCPPort, dnsPort:
 			return true
 		}
 	}
 
-	return destination.Addr() == netip.MustParseAddr(internalIPv6Address) && destination.Port() == transparentTCPPort
+	return destination.Addr() == netip.MustParseAddr(internalIPv6Address) &&
+		(destination.Port() == transparentTCPPort || destination.Port() == dnsPort)
 }

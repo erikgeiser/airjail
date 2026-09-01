@@ -18,6 +18,7 @@ import (
 	"github.com/erikgeiser/airjail/internal/namespace"
 	"github.com/erikgeiser/airjail/internal/outbound"
 	"github.com/erikgeiser/airjail/internal/policy"
+	"github.com/erikgeiser/airjail/internal/proxydns"
 	"github.com/erikgeiser/airjail/internal/proxyhttp"
 	"github.com/erikgeiser/airjail/internal/proxysocks"
 )
@@ -172,6 +173,19 @@ func runWithProxies(
 		}
 	}()
 
+	dnsListener, err := listenConfig.Listen(ctx, "unix", runDir.DNSSocket)
+	if err != nil {
+		return 0, fmt.Errorf("listen on outer DNS proxy socket: %w", err)
+	}
+	defer func() {
+		err := dnsListener.Close()
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Warnf("could not close DNS listener: %v", err)
+		} else {
+			logger.Debugf("closed DNS listener")
+		}
+	}()
+
 	logger.Debugf("session dir %s", runDir.Directory)
 	logger.Debugf("HTTP proxy listening inside network namespace at %s", namespace.HTTPAddress)
 	logger.Debugf("SOCKS proxy listening inside network namespace at %s", namespace.SOCKAddress)
@@ -189,10 +203,20 @@ func runWithProxies(
 		return 0, err
 	}
 
+	dnsUpstream, err := proxydns.NewSystemUpstream("/etc/resolv.conf")
+	if err != nil {
+		return 0, err
+	}
+
+	dnsServer, err := proxydns.New(networkPolicy, dnsUpstream, logger)
+	if err != nil {
+		return 0, err
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	serverErrors := make(chan error, 2)
+	serverErrors := make(chan error, 3)
 
 	var waitGroup sync.WaitGroup
 
@@ -201,6 +225,9 @@ func runWithProxies(
 	})
 	waitGroup.Go(func() {
 		serverErrors <- socksServer.Serve(ctx, socksListener)
+	})
+	waitGroup.Go(func() {
+		serverErrors <- dnsServer.Serve(ctx, dnsListener)
 	})
 
 	type commandResult struct {
@@ -218,6 +245,7 @@ func runWithProxies(
 			Directory:              workingDirectory,
 			HTTPSocket:             runDir.HTTPSocket,
 			SOCKSocket:             runDir.SOCKSocket,
+			DNSSocket:              runDir.DNSSocket,
 			Mode:                   namespaceMode,
 			RestrictUnixSockets:    restrictUnixSockets,
 			KeepUnsafeCapabilities: keepUnsafeCapabilities,
