@@ -5,15 +5,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
-	"sync"
 	"syscall"
 	"time"
 	"unsafe"
 
 	"github.com/erikgeiser/airjail/internal/logging"
+	"github.com/erikgeiser/airjail/internal/stream"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
@@ -71,9 +70,7 @@ type dnsUDPForwarder struct {
 	logger     *logging.Logger
 	queries    chan struct{}
 
-	mutex       sync.Mutex
-	connections map[net.Conn]struct{}
-	waitGroup   sync.WaitGroup
+	connections *stream.ConnGroup
 }
 
 func newDNSUDPForwarder(socketPath string, logger *logging.Logger) *dnsUDPForwarder {
@@ -81,7 +78,7 @@ func newDNSUDPForwarder(socketPath string, logger *logging.Logger) *dnsUDPForwar
 		socketPath:  socketPath,
 		logger:      logger,
 		queries:     make(chan struct{}, maxDNSUDPQueries),
-		connections: make(map[net.Conn]struct{}),
+		connections: stream.NewConnGroup(),
 	}
 }
 
@@ -91,31 +88,15 @@ func (forwarder *dnsUDPForwarder) Serve(
 	responseWriter dnsUDPResponseWriter,
 	ipv6Destination bool,
 ) error {
-	serveDone := make(chan struct{})
-	shutdownComplete := make(chan struct{})
-
-	go func() {
-		defer close(shutdownComplete)
-
-		select {
-		case <-ctx.Done():
-			_ = connection.Close()
-			_ = responseWriter.Close()
-
-			forwarder.closeAll()
-		case <-serveDone:
-		}
-	}()
+	stopShutdown := forwarder.connections.ShutdownOnContext(ctx, connection, responseWriter)
+	defer stopShutdown()
 
 	defer func() {
-		close(serveDone)
-
 		_ = connection.Close()
 		_ = responseWriter.Close()
 
-		forwarder.closeAll()
-		forwarder.waitGroup.Wait()
-		<-shutdownComplete
+		forwarder.connections.Close()
+		forwarder.connections.Wait()
 	}()
 
 	buffer := make([]byte, maxDNSUDPMessageSize+1)
@@ -146,11 +127,14 @@ func (forwarder *dnsUDPForwarder) Serve(
 
 		select {
 		case forwarder.queries <- struct{}{}:
-			forwarder.waitGroup.Go(func() {
+			started := forwarder.connections.Go(func(scope *stream.ConnScope) {
 				defer func() { <-forwarder.queries }()
 
-				forwarder.forward(ctx, responseWriter, client, destination, contents)
+				forwarder.forward(ctx, scope, responseWriter, client, destination, contents)
 			})
+			if !started {
+				<-forwarder.queries
+			}
 		default:
 		}
 	}
@@ -158,56 +142,41 @@ func (forwarder *dnsUDPForwarder) Serve(
 
 func (forwarder *dnsUDPForwarder) forward(
 	ctx context.Context,
+	scope *stream.ConnScope,
 	responseWriter dnsUDPResponseWriter,
 	client netip.AddrPort,
 	destination netip.AddrPort,
 	request []byte,
 ) {
-	stream, err := (&net.Dialer{}).DialContext(ctx, "unix", forwarder.socketPath)
+	streamConnection, err := (&net.Dialer{}).DialContext(ctx, "unix", forwarder.socketPath)
 	if err != nil {
 		forwarder.logger.Debugf("connect outer DNS proxy: %v", err)
 
 		return
 	}
 
-	forwarder.add(stream)
-	defer forwarder.remove(stream)
-	defer func() { _ = stream.Close() }()
+	defer func() { _ = streamConnection.Close() }()
+
+	if !scope.Add(streamConnection) {
+		return
+	}
 
 	deadline := time.Now().Add(dnsForwardTimeout)
 	if contextDeadline, found := ctx.Deadline(); found && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
 	}
 
-	err = stream.SetDeadline(deadline)
+	err = streamConnection.SetDeadline(deadline)
 	if err != nil {
 		return
 	}
 
-	frame := make([]byte, 2, 2+len(request))
-	binary.BigEndian.PutUint16(frame, uint16(len(request)))
-	frame = append(frame, request...)
-
-	err = writeAll(stream, frame)
+	err = stream.WriteUint16Frame(streamConnection, request)
 	if err != nil {
 		return
 	}
 
-	length := make([]byte, 2)
-
-	_, err = io.ReadFull(stream, length)
-	if err != nil {
-		return
-	}
-
-	responseLength := int(binary.BigEndian.Uint16(length))
-	if responseLength == 0 || responseLength > maxDNSUDPMessageSize {
-		return
-	}
-
-	response := make([]byte, responseLength)
-
-	_, err = io.ReadFull(stream, response)
+	response, err := stream.ReadUint16Frame(streamConnection, maxDNSUDPMessageSize)
 	if err != nil {
 		return
 	}
@@ -348,44 +317,4 @@ func parseOriginalDNSDestination(control []byte, ipv6Destination bool) (netip.Ad
 
 func networkPort(rawPort uint16) uint16 {
 	return binary.BigEndian.Uint16((*[2]byte)(unsafe.Pointer(&rawPort))[:])
-}
-
-func writeAll(writer io.Writer, contents []byte) error {
-	for len(contents) != 0 {
-		written, err := writer.Write(contents)
-		if err != nil {
-			return err
-		}
-
-		if written == 0 {
-			return io.ErrShortWrite
-		}
-
-		contents = contents[written:]
-	}
-
-	return nil
-}
-
-func (forwarder *dnsUDPForwarder) add(connection net.Conn) {
-	forwarder.mutex.Lock()
-	defer forwarder.mutex.Unlock()
-
-	forwarder.connections[connection] = struct{}{}
-}
-
-func (forwarder *dnsUDPForwarder) remove(connection net.Conn) {
-	forwarder.mutex.Lock()
-	defer forwarder.mutex.Unlock()
-
-	delete(forwarder.connections, connection)
-}
-
-func (forwarder *dnsUDPForwarder) closeAll() {
-	forwarder.mutex.Lock()
-	defer forwarder.mutex.Unlock()
-
-	for connection := range forwarder.connections {
-		_ = connection.Close()
-	}
 }

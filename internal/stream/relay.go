@@ -1,5 +1,5 @@
-// Package relay copies full-duplex streams with TCP half-close support.
-package relay
+// Package stream provides connection ownership, framing, and full-duplex stream relaying.
+package stream
 
 import (
 	"context"
