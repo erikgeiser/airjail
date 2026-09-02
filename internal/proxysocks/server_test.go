@@ -1,6 +1,7 @@
 package proxysocks
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"io"
@@ -21,26 +22,22 @@ func (connector connectorFunc) Dial(
 	return connector(ctx, destination, port)
 }
 
-func TestValidatingResolverAcceptsScopedIPv6Domain(t *testing.T) {
+func TestNegotiateAuthenticationRejectsUnsupportedMethods(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
+	var response bytes.Buffer
 
-	resolvedCtx, address, err := (validatingResolver{}).Resolve(ctx, "fe80::1%eth0")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+	err := negotiateAuthentication(bytes.NewReader([]byte{5, 1, 2}), &response)
+	if err == nil {
+		t.Fatal("negotiateAuthentication unexpectedly accepted username/password authentication")
 	}
 
-	if resolvedCtx != ctx {
-		t.Error("Resolve replaced the request context")
-	}
-
-	if address != nil {
-		t.Errorf("resolved address = %s, want nil to preserve scoped domain", address)
+	if !bytes.Equal(response.Bytes(), []byte{5, socksNoAcceptableAuth}) {
+		t.Errorf("response = %v, want no acceptable authentication method", response.Bytes())
 	}
 }
 
-func TestSOCKSHostnameConnect(t *testing.T) {
+func TestSOCKSHostnameConnectPreservesPipelinedBytes(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -117,6 +114,7 @@ func TestSOCKSHostnameConnect(t *testing.T) {
 	request = append(request, hostname...)
 
 	request = binary.BigEndian.AppendUint16(request, 8080)
+	request = append(request, []byte("ping")...)
 
 	_, err = client.Write(request)
 	if err != nil {
@@ -132,11 +130,6 @@ func TestSOCKSHostnameConnect(t *testing.T) {
 
 	if reply[1] != 0 {
 		t.Fatalf("SOCKS reply = %d, want success", reply[1])
-	}
-
-	_, err = client.Write([]byte("ping"))
-	if err != nil {
-		t.Fatalf("write tunnel payload: %v", err)
 	}
 
 	payload := make([]byte, 4)
