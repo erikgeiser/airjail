@@ -3,7 +3,6 @@ module github.com/erikgeiser/airjail
 go 1.25.0
 
 require (
-	github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5
 	github.com/elastic/go-seccomp-bpf v1.6.0
 	github.com/google/nftables v0.3.0
 	github.com/miekg/dns v1.1.68
