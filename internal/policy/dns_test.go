@@ -51,9 +51,10 @@ func TestResolutionPortSemantics(t *testing.T) {
 
 			allowed, err = networkPolicy.CommitResolution(
 				authorization,
-				nil,
-				[]netip.Addr{netip.MustParseAddr(test.address)},
-				now.Add(time.Minute),
+				ResolutionResult{
+					Addresses: []netip.Addr{netip.MustParseAddr(test.address)},
+					ExpiresAt: now.Add(time.Minute),
+				},
 				now,
 			)
 			if err != nil {
@@ -80,9 +81,7 @@ func TestResolutionAliasGrantRetainsOriginalPolicy(t *testing.T) {
 
 	allowed, err = networkPolicy.CommitResolution(
 		authorization,
-		[]string{"cdn.test"},
-		nil,
-		now.Add(time.Minute),
+		ResolutionResult{CNAMEChain: []string{"cdn.test"}, ExpiresAt: now.Add(time.Minute)},
 		now,
 	)
 	if err != nil || !allowed {
@@ -98,9 +97,7 @@ func TestResolutionAliasGrantRetainsOriginalPolicy(t *testing.T) {
 
 	allowed, err = networkPolicy.CommitResolution(
 		aliasAuthorization,
-		nil,
-		[]netip.Addr{address},
-		now.Add(time.Minute),
+		ResolutionResult{Addresses: []netip.Addr{address}, ExpiresAt: now.Add(time.Minute)},
 		now,
 	)
 	if err != nil || !allowed {
@@ -130,7 +127,11 @@ func TestExpiredResolutionGrantIsRemoved(t *testing.T) {
 
 	address := netip.MustParseAddr("192.0.2.30")
 
-	allowed, err = networkPolicy.CommitResolution(authorization, nil, []netip.Addr{address}, now.Add(-time.Second), now)
+	allowed, err = networkPolicy.CommitResolution(
+		authorization,
+		ResolutionResult{Addresses: []netip.Addr{address}, ExpiresAt: now.Add(-time.Second)},
+		now,
+	)
 	if err != nil || !allowed {
 		t.Fatalf("CommitResolution = %t, %v", allowed, err)
 	}

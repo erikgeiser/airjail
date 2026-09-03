@@ -4,28 +4,20 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
-	"sync"
 	"time"
 )
-
-const maxDynamicDNSGrants = 8192
-
-type dynamicAddressKey struct {
-	ruleIndex int
-	address   netip.Addr
-}
-
-type dynamicPolicy struct {
-	mutex   sync.Mutex
-	allow   map[dynamicAddressKey]time.Time
-	block   map[dynamicAddressKey]time.Time
-	aliases map[string]map[string]time.Time
-}
 
 // ResolutionAuthorization records the configured policy origins under which a DNS query may proceed.
 type ResolutionAuthorization struct {
 	query   string
 	origins []string
+}
+
+// ResolutionResult contains the policy-relevant records from one validated DNS answer.
+type ResolutionResult struct {
+	CNAMEChain []string
+	Addresses  []netip.Addr
+	ExpiresAt  time.Time
 }
 
 // BeginResolution determines whether a normalized DNS hostname may be resolved.
@@ -40,93 +32,118 @@ func (policy *Policy) BeginResolution(rawHostname string, now time.Time) (Resolu
 
 	policy.dynamic.removeExpired(now)
 
-	origins := []string{hostname}
-	if aliases := policy.dynamic.aliases[hostname]; len(aliases) != 0 {
-		for origin := range aliases {
-			if !slices.Contains(origins, origin) {
-				origins = append(origins, origin)
-			}
-		}
-	}
-
+	origins := policy.resolutionOriginsLocked(hostname)
 	for _, origin := range origins {
 		if policy.hostnameMayResolveLocked(origin) {
 			return ResolutionAuthorization{query: hostname, origins: origins}, true, nil
 		}
 	}
 
-	if len(policy.allow.addresses) != 0 || len(policy.allow.prefixes) != 0 {
-		if policy.hostnameNotBlockedOnEveryPortLocked(hostname) {
-			return ResolutionAuthorization{query: hostname, origins: origins}, true, nil
-		}
+	// Address and prefix allow rules require seeing an answer before the policy
+	// can determine whether an otherwise unknown hostname is useful.
+	if policy.hasAddressAllowRules() && policy.hostnameNotBlockedOnEveryPortLocked(hostname) {
+		return ResolutionAuthorization{query: hostname, origins: origins}, true, nil
 	}
 
 	return ResolutionAuthorization{}, false, nil
 }
 
-// CommitResolution validates a DNS answer and installs its temporary policy grants.
+func (policy *Policy) resolutionOriginsLocked(hostname string) []string {
+	origins := []string{hostname}
+	for origin := range policy.dynamic.aliases[hostname] {
+		if !slices.Contains(origins, origin) {
+			origins = append(origins, origin)
+		}
+	}
+
+	return origins
+}
+
+func (policy *Policy) hasAddressAllowRules() bool {
+	return len(policy.allow.addresses) != 0 || len(policy.allow.prefixes) != 0
+}
+
+// CommitResolution validates a DNS result and installs its temporary policy grants.
 func (policy *Policy) CommitResolution(
 	authorization ResolutionAuthorization,
-	chain []string,
-	addresses []netip.Addr,
-	expires time.Time,
+	result ResolutionResult,
 	now time.Time,
 ) (bool, error) {
 	if authorization.query == "" || len(authorization.origins) == 0 {
 		return false, fmt.Errorf("DNS resolution authorization is empty")
 	}
 
-	normalizedChain := make([]string, 0, len(chain)+1)
-	normalizedChain = append(normalizedChain, authorization.query)
-
-	for _, rawHostname := range chain {
-		hostname, err := NormalizeHostname(rawHostname)
-		if err != nil {
-			return false, fmt.Errorf("normalize DNS answer hostname: %w", err)
-		}
-
-		if !slices.Contains(normalizedChain, hostname) {
-			normalizedChain = append(normalizedChain, hostname)
-		}
+	chain, err := normalizeResolutionChain(authorization.query, result.CNAMEChain)
+	if err != nil {
+		return false, err
 	}
 
-	normalizedAddresses := normalizeAddresses(addresses)
+	addresses := normalizeAddresses(result.Addresses)
 
 	policy.dynamic.mutex.Lock()
 	defer policy.dynamic.mutex.Unlock()
 
 	policy.dynamic.removeExpired(now)
 
-	if len(normalizedAddresses) == 0 && len(normalizedChain) > 1 &&
-		!policy.chainMayResolveLocked(authorization.origins, normalizedChain) {
+	if len(addresses) == 0 && len(chain) > 1 &&
+		!policy.chainMayResolveLocked(authorization.origins, chain) {
 		return false, nil
 	}
 
-	for _, address := range normalizedAddresses {
-		if !policy.addressMayBeUsedLocked(authorization.origins, normalizedChain, address) {
+	// Refuse the complete answer if any terminal address is unusable. Filtering
+	// individual records would change DNS load-balancing and DNSSEC semantics.
+	for _, address := range addresses {
+		if !policy.addressMayBeUsedLocked(authorization.origins, chain, address) {
 			return false, nil
 		}
 	}
 
-	for _, address := range normalizedAddresses {
-		for _, origin := range authorization.origins {
+	policy.installResolutionGrantsLocked(authorization.origins, chain, addresses, result.ExpiresAt)
+
+	return true, nil
+}
+
+func normalizeResolutionChain(query string, rawChain []string) ([]string, error) {
+	chain := make([]string, 0, len(rawChain)+1)
+	chain = append(chain, query)
+
+	for _, rawHostname := range rawChain {
+		hostname, err := NormalizeHostname(rawHostname)
+		if err != nil {
+			return nil, fmt.Errorf("normalize DNS answer hostname: %w", err)
+		}
+
+		if !slices.Contains(chain, hostname) {
+			chain = append(chain, hostname)
+		}
+	}
+
+	return chain, nil
+}
+
+func (policy *Policy) installResolutionGrantsLocked(
+	origins []string,
+	chain []string,
+	addresses []netip.Addr,
+	expires time.Time,
+) {
+	for _, address := range addresses {
+		for _, origin := range origins {
 			policy.addMatchingDynamicAddresses(&policy.allow, policy.dynamic.allow, origin, address, expires)
 		}
 
-		for _, hostname := range normalizedChain {
+		for _, hostname := range chain {
 			policy.addMatchingDynamicAddresses(&policy.block, policy.dynamic.block, hostname, address, expires)
 		}
 	}
 
-	for _, alias := range normalizedChain[1:] {
-		for _, origin := range authorization.origins {
+	for _, alias := range chain[1:] {
+		for _, origin := range origins {
 			policy.dynamic.addAlias(alias, origin, expires)
 		}
 	}
 
 	policy.dynamic.enforceLimit()
-
-	return true, nil
 }
 
 func (policy *Policy) hostnameMayResolveLocked(hostname string) bool {
@@ -165,21 +182,7 @@ func (policy *Policy) chainMayResolveLocked(origins, chain []string) bool {
 			potentiallyAllowed = true
 		}
 
-		if !potentiallyAllowed {
-			continue
-		}
-
-		blocked := false
-
-		for _, hostname := range chain {
-			if policy.block.matches(hostname, netip.Addr{}, port) {
-				blocked = true
-
-				break
-			}
-		}
-
-		if !blocked {
+		if potentiallyAllowed && !policy.chainBlockedLocked(chain, netip.Addr{}, port) {
 			return true
 		}
 	}
@@ -206,23 +209,19 @@ func (policy *Policy) addressRuleMayAllowPort(port uint16) bool {
 func (policy *Policy) addressMayBeUsedLocked(origins, chain []string, address netip.Addr) bool {
 	for _, port := range policy.representativePorts() {
 		for _, origin := range origins {
-			if !policy.allowsLocked(origin, address, port) {
-				continue
-			}
-
-			blocked := false
-
-			for _, hostname := range chain {
-				if policy.block.matches(hostname, address, port) {
-					blocked = true
-
-					break
-				}
-			}
-
-			if !blocked {
+			if policy.allowsLocked(origin, address, port) && !policy.chainBlockedLocked(chain, address, port) {
 				return true
 			}
+		}
+	}
+
+	return false
+}
+
+func (policy *Policy) chainBlockedLocked(chain []string, address netip.Addr, port uint16) bool {
+	for _, hostname := range chain {
+		if policy.block.matches(hostname, address, port) {
+			return true
 		}
 	}
 
@@ -257,6 +256,7 @@ func (policy *Policy) representativePorts() []uint16 {
 		ports = append(ports, port)
 	}
 
+	// One unspecified port represents every port not mentioned by a rule.
 	for port := 1; port <= 65535; port++ {
 		candidate := uint16(port)
 		if _, found := specified[candidate]; !found {
@@ -282,142 +282,4 @@ func (policy *Policy) allowsLocked(hostname string, address netip.Addr, port uin
 
 	return !policy.block.matches(hostname, address, port) &&
 		!policy.dynamicMatches(policy.block.hosts, policy.dynamic.block, address, port)
-}
-
-func (policy *Policy) dynamicMatches(
-	rules []hostRule,
-	expansions map[dynamicAddressKey]time.Time,
-	address netip.Addr,
-	port uint16,
-) bool {
-	if !address.IsValid() {
-		return false
-	}
-
-	for ruleIndex, rule := range rules {
-		if !rule.port.matches(port) {
-			continue
-		}
-
-		if _, found := expansions[dynamicAddressKey{ruleIndex: ruleIndex, address: address}]; found {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (policy *Policy) addMatchingDynamicAddresses(
-	rules *ruleSet,
-	expansions map[dynamicAddressKey]time.Time,
-	hostname string,
-	address netip.Addr,
-	expires time.Time,
-) {
-	for ruleIndex, rule := range rules.hosts {
-		if !rule.matchesHostname(hostname) {
-			continue
-		}
-
-		key := dynamicAddressKey{ruleIndex: ruleIndex, address: address}
-		if current, found := expansions[key]; !found || expires.After(current) {
-			expansions[key] = expires
-		}
-	}
-}
-
-func (dynamic *dynamicPolicy) addAlias(alias, origin string, expires time.Time) {
-	origins := dynamic.aliases[alias]
-	if origins == nil {
-		origins = make(map[string]time.Time)
-		dynamic.aliases[alias] = origins
-	}
-
-	if current, found := origins[origin]; !found || expires.After(current) {
-		origins[origin] = expires
-	}
-}
-
-func (dynamic *dynamicPolicy) removeExpired(now time.Time) {
-	for key, expires := range dynamic.allow {
-		if !expires.After(now) {
-			delete(dynamic.allow, key)
-		}
-	}
-
-	for key, expires := range dynamic.block {
-		if !expires.After(now) {
-			delete(dynamic.block, key)
-		}
-	}
-
-	for alias, origins := range dynamic.aliases {
-		for origin, expires := range origins {
-			if !expires.After(now) {
-				delete(origins, origin)
-			}
-		}
-
-		if len(origins) == 0 {
-			delete(dynamic.aliases, alias)
-		}
-	}
-}
-
-func (dynamic *dynamicPolicy) enforceLimit() {
-	for dynamic.count() > maxDynamicDNSGrants {
-		var (
-			oldestExpiration time.Time
-			remove           func()
-		)
-
-		consider := func(expires time.Time, candidate func()) {
-			if remove == nil || expires.Before(oldestExpiration) {
-				oldestExpiration = expires
-				remove = candidate
-			}
-		}
-
-		for key, expires := range dynamic.allow {
-			key := key
-
-			consider(expires, func() { delete(dynamic.allow, key) })
-		}
-
-		for key, expires := range dynamic.block {
-			key := key
-
-			consider(expires, func() { delete(dynamic.block, key) })
-		}
-
-		for alias, origins := range dynamic.aliases {
-			for origin, expires := range origins {
-				alias := alias
-				origin := origin
-
-				consider(expires, func() {
-					delete(dynamic.aliases[alias], origin)
-
-					if len(dynamic.aliases[alias]) == 0 {
-						delete(dynamic.aliases, alias)
-					}
-				})
-			}
-		}
-
-		if remove == nil {
-			return
-		}
-
-		remove()
-	}
-}
-
-func (dynamic *dynamicPolicy) count() int {
-	count := len(dynamic.allow) + len(dynamic.block)
-	for _, origins := range dynamic.aliases {
-		count += len(origins)
-	}
-
-	return count
 }
