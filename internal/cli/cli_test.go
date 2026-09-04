@@ -110,3 +110,72 @@ func TestParseRejectsMissingCommand(t *testing.T) {
 		t.Fatal("Parse unexpectedly accepted a missing command")
 	}
 }
+
+func TestParseSupervisor(t *testing.T) {
+	t.Parallel()
+
+	invocation, err := ParseSupervisor([]string{
+		"--http-socket", "/run/http.sock",
+		"--socks-socket", "/run/socks.sock",
+		"--dns-socket", "/run/dns.sock",
+		"--log-level", "debug",
+		"--preserve-permissions",
+		"--restrict-unix-sockets",
+		"--keep-unsafe-capability", "CAP_SYS_ADMIN",
+		"--transparent-tcp",
+		"--",
+		"command", "--child-flag",
+	})
+	if err != nil {
+		t.Fatalf("ParseSupervisor: %v", err)
+	}
+
+	if invocation.HTTPSocket != "/run/http.sock" || invocation.SOCKSocket != "/run/socks.sock" ||
+		invocation.DNSSocket != "/run/dns.sock" {
+		t.Errorf("proxy sockets = %q, %q, %q", invocation.HTTPSocket, invocation.SOCKSocket, invocation.DNSSocket)
+	}
+
+	if invocation.LogLevel != "debug" || !invocation.PreservePermissions || !invocation.RestrictUnixSockets ||
+		!invocation.TransparentTCP {
+		t.Errorf("supervisor options = %#v", invocation)
+	}
+
+	if !slices.Equal(invocation.KeepUnsafeCapabilities, []string{"CAP_SYS_ADMIN"}) {
+		t.Errorf("KeepUnsafeCapabilities = %v", invocation.KeepUnsafeCapabilities)
+	}
+
+	if !slices.Equal(invocation.Command, []string{"command", "--child-flag"}) {
+		t.Errorf("Command = %v", invocation.Command)
+	}
+}
+
+func TestParseSupervisorRejectsMissingCommand(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseSupervisor([]string{"--log-level", "debug"})
+	if err == nil {
+		t.Fatal("ParseSupervisor unexpectedly accepted a missing command")
+	}
+}
+
+func TestParseRestrictedExec(t *testing.T) {
+	t.Parallel()
+
+	command, err := ParseRestrictedExec([]string{"--", "command", "--flag"})
+	if err != nil {
+		t.Fatalf("ParseRestrictedExec: %v", err)
+	}
+
+	if !slices.Equal(command, []string{"command", "--flag"}) {
+		t.Errorf("command = %v", command)
+	}
+}
+
+func TestParseRestrictedExecRejectsMissingCommand(t *testing.T) {
+	t.Parallel()
+
+	_, err := ParseRestrictedExec([]string{"--"})
+	if err == nil {
+		t.Fatal("ParseRestrictedExec unexpectedly accepted a missing command")
+	}
+}

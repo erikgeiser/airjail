@@ -13,10 +13,6 @@ import (
 // ExecRestricted installs the optional child seccomp filter and replaces the
 // current process with command.
 func ExecRestricted(command []string) error {
-	if len(command) > 0 && command[0] == "--" {
-		command = command[1:]
-	}
-
 	if len(command) == 0 {
 		return fmt.Errorf("restricted child command is required")
 	}

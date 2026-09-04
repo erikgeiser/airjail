@@ -31,6 +31,19 @@ type Invocation struct {
 	Version bool
 }
 
+// SupervisorInvocation contains configuration for the hidden namespace supervisor command.
+type SupervisorInvocation struct {
+	Command                []string
+	HTTPSocket             string
+	SOCKSocket             string
+	DNSSocket              string
+	LogLevel               string
+	PreservePermissions    bool
+	RestrictUnixSockets    bool
+	KeepUnsafeCapabilities []string
+	TransparentTCP         bool
+}
+
 type flagValues struct {
 	configPath             string
 	allowRules             []string
@@ -60,6 +73,68 @@ func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
 	flags.BoolVar(&values.version, "version", false, "Print version and exit")
 
 	return flags
+}
+
+// ParseSupervisor parses the hidden namespace supervisor command line.
+func ParseSupervisor(args []string) (SupervisorInvocation, error) {
+	flags := pflag.NewFlagSet(SupervisorCommand, pflag.ContinueOnError)
+	flags.SetInterspersed(false)
+	flags.SetOutput(io.Discard)
+
+	invocation := SupervisorInvocation{}
+	flags.StringVar(&invocation.HTTPSocket, SupervisorHTTPSocketOption, "", "outer HTTP proxy socket")
+	flags.StringVar(&invocation.SOCKSocket, SupervisorSOCKSSocketOption, "", "outer SOCKS proxy socket")
+	flags.StringVar(&invocation.DNSSocket, SupervisorDNSSocketOption, "", "outer DNS proxy socket")
+	flags.StringVar(&invocation.LogLevel, SupervisorLogLevel, "warning", "log level")
+	flags.BoolVar(
+		&invocation.PreservePermissions,
+		SupervisorPreservePermissionsOption,
+		false,
+		"preserve caller permissions",
+	)
+	flags.BoolVar(
+		&invocation.RestrictUnixSockets,
+		SupervisorRestrictSocketsOption,
+		false,
+		"restrict child local sockets",
+	)
+	flags.StringArrayVar(
+		&invocation.KeepUnsafeCapabilities,
+		SupervisorKeepUnsafeCapability,
+		nil,
+		"dangerous capability to preserve",
+	)
+	flags.BoolVar(
+		&invocation.TransparentTCP,
+		SupervisorTransparentTCPOption,
+		false,
+		"redirect non-proxy TCP connections",
+	)
+
+	err := flags.Parse(args)
+	if err != nil {
+		return SupervisorInvocation{}, fmt.Errorf("parse supervisor flags: %w", err)
+	}
+
+	invocation.Command = flags.Args()
+	if len(invocation.Command) == 0 {
+		return SupervisorInvocation{}, fmt.Errorf("supervisor child command is required")
+	}
+
+	return invocation, nil
+}
+
+// ParseRestrictedExec parses the hidden restricted-exec command line.
+func ParseRestrictedExec(args []string) ([]string, error) {
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+
+	if len(args) == 0 {
+		return nil, fmt.Errorf("restricted child command is required")
+	}
+
+	return args, nil
 }
 
 // WriteHelp prints public command usage.

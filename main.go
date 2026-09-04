@@ -3,14 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 
 	"github.com/erikgeiser/airjail/internal/application"
 	"github.com/erikgeiser/airjail/internal/cli"
 	"github.com/erikgeiser/airjail/internal/logging"
 	"github.com/erikgeiser/airjail/internal/namespace"
-	"github.com/spf13/pflag"
 )
 
 const setupErrorExitCode = 125
@@ -34,7 +32,12 @@ func run(ctx context.Context, args []string) (int, error) {
 		case cli.SupervisorCommand:
 			return runSupervisor(ctx, args[1:])
 		case cli.RestrictedExecCommand:
-			return 0, namespace.ExecRestricted(args[1:])
+			command, err := cli.ParseRestrictedExec(args[1:])
+			if err != nil {
+				return 0, err
+			}
+
+			return 0, namespace.ExecRestricted(command)
 		}
 	}
 
@@ -42,56 +45,12 @@ func run(ctx context.Context, args []string) (int, error) {
 }
 
 func runSupervisor(ctx context.Context, args []string) (int, error) {
-	flags := pflag.NewFlagSet(cli.SupervisorCommand, pflag.ContinueOnError)
-	flags.SetInterspersed(false)
-	flags.SetOutput(io.Discard)
-
-	var (
-		httpSocket             string
-		socksSocket            string
-		dnsSocket              string
-		logLevel               string
-		preservePermissions    bool
-		restrictUnixSockets    bool
-		keepUnsafeCapabilities []string
-		transparentTCP         bool
-	)
-
-	flags.StringVar(&httpSocket, cli.SupervisorHTTPSocketOption, "", "outer HTTP proxy socket")
-	flags.StringVar(&socksSocket, cli.SupervisorSOCKSSocketOption, "", "outer SOCKS proxy socket")
-	flags.StringVar(&dnsSocket, cli.SupervisorDNSSocketOption, "", "outer DNS proxy socket")
-	flags.StringVar(&logLevel, cli.SupervisorLogLevel, "warning", "log level")
-	flags.BoolVar(
-		&preservePermissions,
-		cli.SupervisorPreservePermissionsOption,
-		false,
-		"preserve caller permissions",
-	)
-	flags.BoolVar(
-		&restrictUnixSockets,
-		cli.SupervisorRestrictSocketsOption,
-		false,
-		"restrict child local sockets",
-	)
-	flags.StringArrayVar(
-		&keepUnsafeCapabilities,
-		cli.SupervisorKeepUnsafeCapability,
-		nil,
-		"dangerous capability to preserve",
-	)
-	flags.BoolVar(
-		&transparentTCP,
-		cli.SupervisorTransparentTCPOption,
-		false,
-		"redirect non-proxy TCP connections",
-	)
-
-	err := flags.Parse(args)
+	invocation, err := cli.ParseSupervisor(args)
 	if err != nil {
-		return 0, fmt.Errorf("parse supervisor flags: %w", err)
+		return 0, err
 	}
 
-	logger, err := logging.New(os.Stderr, logLevel, "supervisor")
+	logger, err := logging.New(os.Stderr, invocation.LogLevel, "supervisor")
 	if err != nil {
 		return 0, fmt.Errorf("setup supervisor logger: %w", err)
 	}
@@ -103,27 +62,22 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		return 0, err
 	}
 
-	command := flags.Args()
-	if len(command) == 0 {
-		return 0, fmt.Errorf("supervisor child command is required")
-	}
-
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		return 0, fmt.Errorf("get supervisor working directory: %w", err)
 	}
 
 	return namespace.RunSupervisor(ctx, namespace.SupervisorOptions{
-		Command:                command,
+		Command:                invocation.Command,
 		Environment:            os.Environ(),
 		Directory:              workingDirectory,
-		HTTPSocket:             httpSocket,
-		SOCKSocket:             socksSocket,
-		DNSSocket:              dnsSocket,
-		PreservePermissions:    preservePermissions,
-		RestrictUnixSockets:    restrictUnixSockets,
-		KeepUnsafeCapabilities: keepUnsafeCapabilities,
-		TransparentTCP:         transparentTCP,
+		HTTPSocket:             invocation.HTTPSocket,
+		SOCKSocket:             invocation.SOCKSocket,
+		DNSSocket:              invocation.DNSSocket,
+		PreservePermissions:    invocation.PreservePermissions,
+		RestrictUnixSockets:    invocation.RestrictUnixSockets,
+		KeepUnsafeCapabilities: invocation.KeepUnsafeCapabilities,
+		TransparentTCP:         invocation.TransparentTCP,
 		Logger:                 logger,
 	})
 }
