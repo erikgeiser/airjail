@@ -15,13 +15,21 @@ type dangerousCapability struct {
 }
 
 var dangerousCapabilities = []dangerousCapability{
+	// Can enter an outer network namespace with setns.
 	{name: "CAP_SYS_ADMIN", value: unix.CAP_SYS_ADMIN},
+	// Can alter interception rules and routes.
 	{name: "CAP_NET_ADMIN", value: unix.CAP_NET_ADMIN},
+	// Can inject syscalls into a trusted outer process.
 	{name: "CAP_SYS_PTRACE", value: unix.CAP_SYS_PTRACE},
+	// Can load kernel code that bypasses namespace isolation.
 	{name: "CAP_SYS_MODULE", value: unix.CAP_SYS_MODULE},
+	// Can access devices or memory beyond namespace isolation.
 	{name: "CAP_SYS_RAWIO", value: unix.CAP_SYS_RAWIO},
+	// Can load kernel programs that subvert network isolation.
 	{name: "CAP_BPF", value: unix.CAP_BPF},
+	// Can observe activity outside the network namespace.
 	{name: "CAP_PERFMON", value: unix.CAP_PERFMON},
+	// Enables process restoration that can weaken isolation.
 	{name: "CAP_CHECKPOINT_RESTORE", value: unix.CAP_CHECKPOINT_RESTORE},
 }
 

@@ -61,6 +61,15 @@ func NewRouted(
 	return &Direct{policy: networkPolicy, resolver: resolver, dialAddress: route, logger: logger}
 }
 
+func (direct *Direct) WithLoggerPrefix(prefix string) *Direct {
+	return &Direct{
+		policy:      direct.policy,
+		resolver:    direct.resolver,
+		dialAddress: direct.dialAddress,
+		logger:      direct.logger.WithPrefix(prefix),
+	}
+}
+
 // Dial connects to a strictly parsed destination after checking the concrete dialed address.
 func (direct *Direct) Dial(ctx context.Context, destination policy.Destination, port uint16) (net.Conn, error) {
 	if direct.policy == nil {
@@ -150,8 +159,8 @@ func (direct *Direct) logDecision(allowed bool, hostname string, address netip.A
 	}
 
 	if allowed {
-		direct.logger.Allowf("tcp %s:%d (%s)", target, port, address)
+		direct.logger.Allowf("%s:%d (%s)", target, port, address)
 	} else {
-		direct.logger.Blockf("tcp %s:%d (%s)", target, port, address)
+		direct.logger.Blockf("%s:%d (%s)", target, port, address)
 	}
 }

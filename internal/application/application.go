@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/erikgeiser/airjail/internal/cli"
 	"github.com/erikgeiser/airjail/internal/logging"
@@ -21,6 +20,7 @@ import (
 	"github.com/erikgeiser/airjail/internal/proxydns"
 	"github.com/erikgeiser/airjail/internal/proxyhttp"
 	"github.com/erikgeiser/airjail/internal/proxysocks"
+	"golang.org/x/sync/errgroup"
 )
 
 // Run executes one public airjail invocation.
@@ -151,6 +151,8 @@ func runWithProxies(
 		return 0, fmt.Errorf("listen on outer HTTP proxy socket: %w", err)
 	}
 
+	logger.Debugf("HTTP proxy listening on %s", runDir.HTTPSocket)
+
 	defer func() {
 		err := httpListener.Close()
 		if err != nil && !errors.Is(err, net.ErrClosed) {
@@ -164,6 +166,9 @@ func runWithProxies(
 	if err != nil {
 		return 0, fmt.Errorf("listen on outer SOCKS proxy socket: %w", err)
 	}
+
+	logger.Debugf("SOCKS proxy listening on %s", runDir.SOCKSocket)
+
 	defer func() {
 		err := socksListener.Close()
 		if err != nil && !errors.Is(err, net.ErrClosed) {
@@ -177,6 +182,9 @@ func runWithProxies(
 	if err != nil {
 		return 0, fmt.Errorf("listen on outer DNS proxy socket: %w", err)
 	}
+
+	logger.Debugf("DNS proxy listening on %s", runDir.DNSSocket)
+
 	defer func() {
 		err := dnsListener.Close()
 		if err != nil && !errors.Is(err, net.ErrClosed) {
@@ -186,19 +194,15 @@ func runWithProxies(
 		}
 	}()
 
-	logger.Debugf("session dir %s", runDir.Directory)
-	logger.Debugf("HTTP proxy listening inside network namespace at %s", namespace.HTTPAddress)
-	logger.Debugf("SOCKS proxy listening inside network namespace at %s", namespace.SOCKAddress)
-
 	router, err := outbound.NewEnvironmentRouter(os.Environ())
 	if err != nil {
 		return 0, err
 	}
 
 	connector := outbound.NewRouted(networkPolicy, nil, router.Dial, logger)
-	httpServer := proxyhttp.New(connector)
+	httpServer := proxyhttp.New(connector.WithLoggerPrefix("HTTP proxy"))
 
-	socksServer, err := proxysocks.New(connector)
+	socksServer, err := proxysocks.New(connector.WithLoggerPrefix("SOCKS proxy"))
 	if err != nil {
 		return 0, err
 	}
@@ -208,7 +212,7 @@ func runWithProxies(
 		return 0, err
 	}
 
-	dnsServer, err := proxydns.New(networkPolicy, dnsUpstream, logger)
+	dnsServer, err := proxydns.New(networkPolicy, dnsUpstream, logger.WithPrefix("DNS proxy"))
 	if err != nil {
 		return 0, err
 	}
@@ -216,19 +220,35 @@ func runWithProxies(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	serverErrors := make(chan error, 3)
+	serverGroup, serverCtx := errgroup.WithContext(ctx)
 
-	var waitGroup sync.WaitGroup
+	runServer := func(
+		name string,
+		listener net.Listener,
+		serve func(context.Context, net.Listener) error,
+	) func() error {
+		return func() error {
+			err := serve(serverCtx, listener)
+			if err != nil {
+				return err
+			}
 
-	waitGroup.Go(func() {
-		serverErrors <- httpServer.Serve(ctx, httpListener)
-	})
-	waitGroup.Go(func() {
-		serverErrors <- socksServer.Serve(ctx, socksListener)
-	})
-	waitGroup.Go(func() {
-		serverErrors <- dnsServer.Serve(ctx, dnsListener)
-	})
+			if serverCtx.Err() == nil {
+				return fmt.Errorf("%s proxy server stopped unexpectedly", name)
+			}
+
+			return nil
+		}
+	}
+
+	serverGroup.Go(runServer("HTTP", httpListener, httpServer.Serve))
+	serverGroup.Go(runServer("SOCKS", socksListener, socksServer.Serve))
+	serverGroup.Go(runServer("DNS", dnsListener, dnsServer.Serve))
+
+	serverResults := make(chan error, 1)
+	go func() {
+		serverResults <- serverGroup.Wait()
+	}()
 
 	type commandResult struct {
 		exitCode int
@@ -238,7 +258,7 @@ func runWithProxies(
 	commandResults := make(chan commandResult, 1)
 
 	go func() {
-		exitCode, runErr := namespace.Run(ctx, namespace.ParentOptions{
+		exitCode, runErr := namespace.Run(serverCtx, namespace.ParentOptions{
 			Executable:             executable,
 			Command:                command,
 			Environment:            environment,
@@ -255,25 +275,23 @@ func runWithProxies(
 		commandResults <- commandResult{exitCode: exitCode, err: runErr}
 	}()
 
-	var result commandResult
+	var (
+		result    commandResult
+		serverErr error
+	)
+
 	select {
 	case result = <-commandResults:
 		cancel()
-	case serverErr := <-serverErrors:
-		if serverErr == nil {
-			serverErr = fmt.Errorf("outer proxy server stopped unexpectedly")
-		}
-
+		serverErr = <-serverResults
+	case serverErr = <-serverResults:
 		cancel()
-
 		result = <-commandResults
-		if result.err == nil {
-			result.err = serverErr
-		}
 	}
 
-	cancel()
-	waitGroup.Wait()
+	if result.err == nil {
+		result.err = serverErr
+	}
 
 	if result.err != nil {
 		return 0, result.err

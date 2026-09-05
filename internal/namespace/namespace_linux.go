@@ -131,8 +131,6 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 
 	sys := namespaceProcessAttributes(options.Mode)
 
-	logger := options.Logger.WithPrefix("supervisor")
-
 	exitCode, err := runSandboxedProcess(ctx, arguments, runOptions{
 		Environment: options.Environment,
 		Directory:   options.Directory,
@@ -140,7 +138,7 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 		// Keep the hidden supervisor in airjail's shell job, only the actual
 		// command gets a foreground process group.
 		JoinParentProcessGroup: true,
-		Logger:                 logger,
+		Logger:                 options.Logger,
 	})
 	if err != nil {
 		if options.Mode == PermissionPreservingMode {
@@ -212,6 +210,8 @@ type SupervisorOptions struct {
 
 // RunSupervisor configures loopback, starts bridges, and supervises the command.
 func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) {
+	options.Logger = options.Logger.WithPrefix("supervisor")
+
 	for _, socketPath := range []string{options.HTTPSocket, options.SOCKSocket, options.DNSSocket} {
 		if socketPath == "" {
 			continue
@@ -261,6 +261,8 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			return 0, fmt.Errorf("listen on inner HTTP proxy %s: %w", HTTPAddress, err)
 		}
 
+		options.Logger.WithPrefix("HTTP proxy bridge").Debugf("listening on %s in namespace", HTTPAddress)
+
 		servers = append(servers, bridgeServer{listener: listener, server: newForwarder(options.HTTPSocket)})
 	}
 
@@ -272,6 +274,8 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			return 0, fmt.Errorf("listen on inner SOCKS proxy %s: %w", SOCKAddress, err)
 		}
 
+		options.Logger.WithPrefix("SOCKS proxy bridge").Debugf("listening on %s in namespace", HTTPAddress)
+
 		servers = append(servers, bridgeServer{listener: listener, server: newForwarder(options.SOCKSocket)})
 	}
 
@@ -280,7 +284,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			ctx,
 			&listenConfig,
 			options.DNSSocket,
-			options.Logger,
+			options.Logger.WithPrefix("DNS bridge"),
 		)
 		if setupErr != nil {
 			closeBridgeListeners(servers)
@@ -296,7 +300,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			&listenConfig,
 			options.SOCKSocket,
 			options.DNSSocket,
-			options.Logger,
+			options.Logger.WithPrefix("transparent TCP to SOCKS bridge"),
 		)
 		if setupErr != nil {
 			closeBridgeListeners(servers)
@@ -390,15 +394,13 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			command = append([]string{executable, cli.RestrictedExecCommand, "--"}, command...)
 		}
 
-		logger := options.Logger.WithPrefix("child")
-
 		childExitCode, childErr = runSandboxedProcess(groupCtx, command, runOptions{
 			Environment:      options.Environment,
 			Directory:        options.Directory,
 			Sys:              childProcessAttributes,
 			ManageForeground: options.ManageForeground,
 			ReapProcessGroup: true,
-			Logger:           logger,
+			Logger:           options.Logger,
 		})
 
 		return nil
@@ -529,6 +531,8 @@ func createDNSBridgeServers(
 			return nil, nil, fmt.Errorf("listen on inner DNS TCP gateway %s: %w", endpoint.address, err)
 		}
 
+		logger.Debugf("listening on %s in namepspace", endpoint.address)
+
 		servers = append(servers, bridgeServer{listener: listener, server: newForwarder(socketPath)})
 
 		udpConnection, err := createDNSUDPQuerySocket(ctx, endpoint.udpNetwork, endpoint.ipv6)
@@ -592,6 +596,8 @@ func createTransparentTCPServers(
 
 			return nil, fmt.Errorf("listen on inner transparent TCP gateway %s: %w", endpoint.address, err)
 		}
+
+		logger.Debugf("listening on %s in namepspace", endpoint.address)
 
 		transparentServer, err := newTransparentTCPForwarder(socketPath, dnsSocketPath, logger)
 		if err != nil {

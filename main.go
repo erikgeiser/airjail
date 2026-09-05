@@ -50,7 +50,7 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		return 0, err
 	}
 
-	logger, err := logging.New(os.Stderr, invocation.LogLevel, "supervisor")
+	logger, err := logging.New(os.Stderr, invocation.LogLevel, "")
 	if err != nil {
 		return 0, fmt.Errorf("setup supervisor logger: %w", err)
 	}

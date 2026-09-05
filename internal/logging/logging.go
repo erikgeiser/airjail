@@ -110,11 +110,11 @@ func (logger *Logger) Infof(format string, arguments ...any) {
 }
 
 func (logger *Logger) Allowf(format string, arguments ...any) {
-	logger.logf(Traffic, "allowed", "\033[32m", format, arguments...)
+	logger.logf(Traffic, "traffic", "\033[32m", "allowed: "+format, arguments...)
 }
 
 func (logger *Logger) Blockf(format string, arguments ...any) {
-	logger.logf(Traffic, "blocked", "\033[31m", format, arguments...)
+	logger.logf(Traffic, "traffic", "\033[31m", "blocked: "+format, arguments...)
 }
 
 func (logger *Logger) Warnf(format string, arguments ...any) {

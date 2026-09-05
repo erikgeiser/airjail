@@ -60,7 +60,10 @@ func (forwarder *transparentTCPForwarder) Serve(ctx context.Context, listener ne
 		}
 
 		started := forwarder.connections.Go(func(scope *stream.ConnScope) {
-			forwarder.forward(ctx, scope, connection)
+			err := forwarder.forward(ctx, scope, connection)
+			if err != nil && !errors.Is(err, context.Canceled) {
+				forwarder.logger.Debugf("forwarding connection: %v", err)
+			}
 		}, connection)
 		if !started {
 			_ = connection.Close()
@@ -72,27 +75,23 @@ func (forwarder *transparentTCPForwarder) forward(
 	ctx context.Context,
 	scope *stream.ConnScope,
 	connection net.Conn,
-) {
+) error {
 	defer func() { _ = connection.Close() }()
 
 	tcpConnection, ok := connection.(*net.TCPConn)
 	if !ok {
-		forwarder.logger.Debugf("reject transparent connection with type %T", connection)
-
-		return
+		return fmt.Errorf("reject transparent connection with type %T", connection)
 	}
 
 	destination, err := originalDestination(tcpConnection)
 	if err != nil {
-		forwarder.logger.Debugf("recover transparent TCP destination: %v", err)
-
-		return
+		return fmt.Errorf("recover transparent TCP destination: %w", err)
 	}
 
-	if isInternalEndpoint(destination) {
-		forwarder.logger.Debugf("reject direct connection to internal endpoint %s", destination)
+	forwarder.logger.Debugf("redirecting connection to %s through SOCKS proxy", destination)
 
-		return
+	if isInternalEndpoint(destination) {
+		return fmt.Errorf("reject direct connection to internal endpoint %s", destination)
 	}
 
 	var upstream net.Conn
@@ -103,21 +102,21 @@ func (forwarder *transparentTCPForwarder) forward(
 	}
 
 	if err != nil {
-		forwarder.logger.Debugf("connect transparent TCP destination %s: %v", destination, err)
-
-		return
+		return fmt.Errorf("connect transparent TCP destination %s: %w", destination, err)
 	}
 
 	defer func() { _ = upstream.Close() }()
 
 	if !scope.Add(upstream) {
-		return
+		return fmt.Errorf("could not add connection to scope")
 	}
 
 	err = stream.Bidirectional(ctx, connection, connection, upstream)
 	if err != nil {
-		forwarder.logger.Debugf("relay transparent TCP destination %s: %v", destination, err)
+		return fmt.Errorf("relay transparent TCP destination %s: %w", destination, err)
 	}
+
+	return nil
 }
 
 func originalDestination(connection *net.TCPConn) (netip.AddrPort, error) {

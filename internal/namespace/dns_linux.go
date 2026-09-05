@@ -1,6 +1,7 @@
 package namespace
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,7 +16,6 @@ import (
 const (
 	maxDNSUDPMessageSize = 4096
 	dnsForwardTimeout    = 10 * time.Second
-	maxDNSUDPQueries     = 256
 )
 
 type dnsUDPResponseWriter interface {
@@ -26,7 +26,6 @@ type dnsUDPResponseWriter interface {
 type dnsUDPForwarder struct {
 	socketPath string
 	logger     *logging.Logger
-	queries    chan struct{}
 
 	connections *stream.ConnGroup
 }
@@ -35,7 +34,6 @@ func newDNSUDPForwarder(socketPath string, logger *logging.Logger) *dnsUDPForwar
 	return &dnsUDPForwarder{
 		socketPath:  socketPath,
 		logger:      logger,
-		queries:     make(chan struct{}, maxDNSUDPQueries),
 		connections: stream.NewConnGroup(),
 	}
 }
@@ -71,39 +69,32 @@ func (forwarder *dnsUDPForwarder) Serve(
 		}
 
 		if read == 0 || read > maxDNSUDPMessageSize {
+			forwarder.logger.Debugf(
+				"UDP message with %d bytes exceeded maximum message size of %d bytes and will be ignored",
+				read,
+				maxDNSUDPMessageSize,
+			)
+
 			continue
 		}
 
 		destination, err := parseOriginalDNSDestination(control[:controlRead], ipv6Destination)
 		if err != nil {
-			forwarder.logger.Debugf("recover original DNS UDP destination: %v", err)
+			forwarder.logger.Debugf(
+				"ignoring DNS query because original UDP destination could not be discovered: %v",
+				err)
 
 			continue
 		}
 
-		request := append([]byte(nil), buffer[:read]...)
-		forwarder.startQuery(ctx, responseWriter, client, destination, request)
-	}
-}
+		request := bytes.Clone(buffer[:read])
 
-func (forwarder *dnsUDPForwarder) startQuery(
-	ctx context.Context,
-	responseWriter dnsUDPResponseWriter,
-	client netip.AddrPort,
-	destination netip.AddrPort,
-	request []byte,
-) {
-	select {
-	case forwarder.queries <- struct{}{}:
-		started := forwarder.connections.Go(func(scope *stream.ConnScope) {
-			defer func() { <-forwarder.queries }()
-
-			forwarder.forward(ctx, scope, responseWriter, client, destination, request)
+		forwarder.connections.Go(func(scope *stream.ConnScope) {
+			err := forwarder.forward(ctx, scope, responseWriter, client, destination, request)
+			if err != nil {
+				forwarder.logger.Debugf("could not forward DNS message: %v", err)
+			}
 		})
-		if !started {
-			<-forwarder.queries
-		}
-	default:
 	}
 }
 
@@ -114,17 +105,15 @@ func (forwarder *dnsUDPForwarder) forward(
 	client netip.AddrPort,
 	destination netip.AddrPort,
 	request []byte,
-) {
+) error {
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", forwarder.socketPath)
 	if err != nil {
-		forwarder.logger.Debugf("connect outer DNS proxy: %v", err)
-
-		return
+		return fmt.Errorf("connect to outer proxy: %w", err)
 	}
 	defer func() { _ = connection.Close() }()
 
 	if !scope.Add(connection) {
-		return
+		return fmt.Errorf("add connection: %w", err)
 	}
 
 	deadline := time.Now().Add(dnsForwardTimeout)
@@ -134,21 +123,23 @@ func (forwarder *dnsUDPForwarder) forward(
 
 	err = connection.SetDeadline(deadline)
 	if err != nil {
-		return
+		return fmt.Errorf("set deadline: %w", err)
 	}
 
 	err = stream.WriteUint16Frame(connection, request)
 	if err != nil {
-		return
+		return fmt.Errorf("write datagram frame: %w", err)
 	}
 
 	response, err := stream.ReadUint16Frame(connection, maxDNSUDPMessageSize)
 	if err != nil {
-		return
+		return fmt.Errorf("read response frame: %w", err)
 	}
 
 	err = responseWriter.WriteResponse(response, client, destination)
 	if err != nil {
-		forwarder.logger.Debugf("write inner DNS UDP response: %v", err)
+		return fmt.Errorf("send DNS reply to client: %w", err)
 	}
+
+	return nil
 }

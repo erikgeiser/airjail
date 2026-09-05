@@ -66,7 +66,7 @@ func runSandboxedProcess(ctx context.Context, command []string, options runOptio
 		SysProcAttr: sys,
 	}
 
-	options.Logger.Debugf("start sandboxed process: %s", strings.Join(command, " "))
+	options.Logger.Debugf("starting process in sandbox: %s", strings.Join(command, " "))
 
 	err = child.Start()
 	if err != nil {

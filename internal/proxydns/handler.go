@@ -32,7 +32,7 @@ func (server *Server) handle(ctx context.Context, wireRequest []byte) []byte {
 	}
 
 	if !allowed {
-		server.logDecision(false, query)
+		server.logger.Blockf(dns.TypeToString[query.queryType] + " " + query.hostname)
 
 		return packResponse(query.request, dns.RcodeRefused)
 	}
@@ -62,7 +62,7 @@ func (server *Server) handle(ctx context.Context, wireRequest []byte) []byte {
 	upstreamResponse.Question = query.request.Question
 
 	if upstreamResponse.Rcode != dns.RcodeSuccess {
-		server.logDecision(true, query)
+		server.logger.Allowf(dns.TypeToString[query.queryType] + " " + query.hostname)
 
 		return packMessage(upstreamResponse)
 	}
@@ -83,13 +83,13 @@ func (server *Server) handle(ctx context.Context, wireRequest []byte) []byte {
 		}
 
 		if !allowed {
-			server.logDecision(false, query)
+			server.logger.Blockf(dns.TypeToString[query.queryType] + " " + query.hostname)
 
 			return packResponse(query.request, dns.RcodeRefused)
 		}
 	}
 
-	server.logDecision(true, query)
+	server.logger.Allowf(dns.TypeToString[query.queryType] + " " + query.hostname)
 
 	return packMessage(upstreamResponse)
 }
@@ -136,14 +136,6 @@ func (server *Server) acquireQuery(ctx context.Context) bool {
 
 func (server *Server) releaseQuery() {
 	<-server.queries
-}
-
-func (server *Server) logDecision(allowed bool, query clientQuery) {
-	if allowed {
-		server.logger.Allowf("dns %s %s", dns.TypeToString[query.queryType], query.hostname)
-	} else {
-		server.logger.Blockf("dns %s %s", dns.TypeToString[query.queryType], query.hostname)
-	}
 }
 
 func newUpstreamRequest(query clientQuery) *dns.Msg {
