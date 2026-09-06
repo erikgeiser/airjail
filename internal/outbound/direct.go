@@ -33,7 +33,7 @@ type Direct struct {
 // NewDirect creates a connector using a conventional network dialer. It is primarily useful in tests.
 func NewDirect(networkPolicy *policy.Policy, resolver policy.Resolver, dial DialFunc, logger *logging.Logger) *Direct {
 	if dial == nil {
-		netDialer := &net.Dialer{Timeout: connectTimeout}
+		netDialer := &net.Dialer{Timeout: defaultConnectTimeout}
 		dial = netDialer.DialContext
 	}
 

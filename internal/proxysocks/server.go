@@ -39,19 +39,25 @@ type Connector interface {
 
 // Server is a TCP CONNECT-only SOCKS5 proxy.
 type Server struct {
-	connector   Connector
-	connections *stream.ConnGroup
+	connector      Connector
+	connectTimeout time.Duration
+	connections    *stream.ConnGroup
 }
 
 // New creates a SOCKS5 proxy.
-func New(connector Connector) (*Server, error) {
+func New(connector Connector, connectTimeout time.Duration) (*Server, error) {
 	if connector == nil {
 		return nil, fmt.Errorf("create SOCKS server: connector is nil")
 	}
 
+	if connectTimeout <= 0 {
+		return nil, fmt.Errorf("create SOCKS server: connect timeout must be greater than zero")
+	}
+
 	return &Server{
-		connector:   connector,
-		connections: stream.NewConnGroup(),
+		connector:      connector,
+		connectTimeout: connectTimeout,
+		connections:    stream.NewConnGroup(),
 	}, nil
 }
 
@@ -92,9 +98,6 @@ func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
 }
 
 func (server *Server) serveConnection(ctx context.Context, scope *stream.ConnScope, connection net.Conn) error {
-	handshakeCtx, cancelHandshake := context.WithTimeout(ctx, socksHandshakeTimeout)
-	defer cancelHandshake()
-
 	reader := bufio.NewReader(connection)
 
 	err := negotiateAuthentication(reader, connection)
@@ -111,7 +114,18 @@ func (server *Server) serveConnection(ctx context.Context, scope *stream.ConnSco
 		return err
 	}
 
-	upstream, err := server.connector.Dial(handshakeCtx, destination, port)
+	connectCtx, cancelConnect := context.WithTimeout(ctx, server.connectTimeout)
+	defer cancelConnect()
+
+	deadline, hasDeadline := connectCtx.Deadline()
+	if hasDeadline {
+		err = connection.SetDeadline(deadline)
+		if err != nil {
+			return fmt.Errorf("set SOCKS connect deadline: %w", err)
+		}
+	}
+
+	upstream, err := server.connector.Dial(connectCtx, destination, port)
 	if err != nil {
 		responseCode = socksGeneralFailure
 		if errors.Is(err, outbound.ErrDenied) {
@@ -124,7 +138,7 @@ func (server *Server) serveConnection(ctx context.Context, scope *stream.ConnSco
 	}
 	defer func() { _ = upstream.Close() }()
 
-	cancelHandshake()
+	cancelConnect()
 
 	if !scope.Add(upstream) {
 		return fmt.Errorf("register SOCKS upstream during shutdown")

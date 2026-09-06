@@ -21,25 +21,38 @@ import (
 )
 
 const (
-	connectTimeout       = 30 * time.Second
-	maxConnectHeaderSize = 16 * 1024
-	proxyHTTPScheme      = "https"
+	defaultConnectTimeout = 5 * time.Second
+	maxConnectHeaderSize  = 16 * 1024
+	proxyHTTPScheme       = "https"
 )
 
-// EnvironmentRouter routes approved addresses according to the outer proxy environment.
-type EnvironmentRouter struct {
-	proxyURL *url.URL
-	bypass   func(*url.URL) (*url.URL, error)
-	dialer   net.Dialer
+// ProxyAwareRouter routes approved addresses through a configured or environment proxy.
+type ProxyAwareRouter struct {
+	proxyURL       *url.URL
+	bypass         func(*url.URL) (*url.URL, error)
+	dialer         net.Dialer
+	connectTimeout time.Duration
 }
 
-// NewEnvironmentRouter snapshots HTTP(S)/ALL_PROXY and NO_PROXY from environment.
-func NewEnvironmentRouter(environment []string) (*EnvironmentRouter, error) {
+// NewProxyAwareRouter configures routing from an explicit proxy or the outer proxy environment.
+func NewProxyAwareRouter(
+	environment []string,
+	configuredProxy string,
+	connectTimeout time.Duration,
+) (*ProxyAwareRouter, error) {
+	if connectTimeout <= 0 {
+		return nil, fmt.Errorf("create proxy-aware router: connect timeout must be greater than zero")
+	}
+
 	values := environmentMap(environment)
-	proxyValue := firstEnvironment(
-		values,
-		"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy",
-	)
+
+	proxyValue := configuredProxy
+	if proxyValue == "" {
+		proxyValue = firstEnvironment(
+			values,
+			"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy",
+		)
+	}
 
 	proxyURL, err := parseProxyURL(proxyValue)
 	if err != nil {
@@ -53,20 +66,24 @@ func NewEnvironmentRouter(environment []string) (*EnvironmentRouter, error) {
 		NoProxy:    noProxy,
 	}
 
-	return &EnvironmentRouter{
-		proxyURL: proxyURL,
-		bypass:   bypassConfig.ProxyFunc(),
-		dialer:   net.Dialer{Timeout: connectTimeout},
+	return &ProxyAwareRouter{
+		proxyURL:       proxyURL,
+		bypass:         bypassConfig.ProxyFunc(),
+		dialer:         net.Dialer{Timeout: connectTimeout},
+		connectTimeout: connectTimeout,
 	}, nil
 }
 
 // Dial connects directly or through the configured outer proxy.
-func (router *EnvironmentRouter) Dial(
+func (router *ProxyAwareRouter) Dial(
 	ctx context.Context,
 	hostname string,
 	address netip.Addr,
 	port uint16,
 ) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, router.connectTimeout)
+	defer cancel()
+
 	if address.Zone() != "" || address.WithZone("").IsLoopback() {
 		// IPv6 zones name interfaces on this host and cannot be delegated to an
 		// upstream proxy running in a different network context. Loopback must
@@ -112,7 +129,7 @@ func (router *EnvironmentRouter) Dial(
 	}
 }
 
-func (router *EnvironmentRouter) dialSOCKSProxy(
+func (router *ProxyAwareRouter) dialSOCKSProxy(
 	ctx context.Context,
 	proxyURL *url.URL,
 	address netip.Addr,
@@ -138,7 +155,7 @@ func (router *EnvironmentRouter) dialSOCKSProxy(
 	return connection, nil
 }
 
-func (router *EnvironmentRouter) dialHTTPProxy(
+func (router *ProxyAwareRouter) dialHTTPProxy(
 	ctx context.Context,
 	proxyURL *url.URL,
 	address netip.Addr,
@@ -155,11 +172,8 @@ func (router *EnvironmentRouter) dialHTTPProxy(
 		}
 	}
 
-	handshakeContext, cancel := context.WithTimeout(ctx, connectTimeout)
-	defer cancel()
-
 	connection, err := router.dialer.DialContext(
-		handshakeContext,
+		ctx,
 		"tcp",
 		net.JoinHostPort(proxyHost, proxyPort),
 	)
@@ -174,7 +188,7 @@ func (router *EnvironmentRouter) dialHTTPProxy(
 		}
 	}()
 
-	deadline, hasDeadline := handshakeContext.Deadline()
+	deadline, hasDeadline := ctx.Deadline()
 	if hasDeadline {
 		err = connection.SetDeadline(deadline)
 		if err != nil {
@@ -190,7 +204,7 @@ func (router *EnvironmentRouter) dialHTTPProxy(
 
 		tlsConnection := tls.Client(connection, tlsConfig)
 
-		err = tlsConnection.HandshakeContext(handshakeContext)
+		err = tlsConnection.HandshakeContext(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("negotiate TLS with outer HTTPS proxy: %w", err)
 		}

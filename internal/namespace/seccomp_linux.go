@@ -5,14 +5,16 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 
 	seccomp "github.com/elastic/go-seccomp-bpf"
+	"github.com/erikgeiser/airjail/internal/logging"
 	"golang.org/x/sys/unix"
 )
 
 // ExecRestricted installs the optional child seccomp filter and replaces the
 // current process with command.
-func ExecRestricted(command []string) error {
+func ExecRestricted(command []string, logger *logging.Logger) error {
 	if len(command) == 0 {
 		return fmt.Errorf("restricted child command is required")
 	}
@@ -21,6 +23,8 @@ func ExecRestricted(command []string) error {
 	if err != nil {
 		return fmt.Errorf("look up restricted command %q: %w", command[0], err)
 	}
+
+	logger.Debugf("install local socket restrictions")
 
 	err = seccomp.SetNoNewPrivs()
 	if err != nil {
@@ -36,6 +40,8 @@ func ExecRestricted(command []string) error {
 	if err != nil {
 		return fmt.Errorf("restrict local sockets: %w", err)
 	}
+
+	logger.Debugf("starting process in sandbox: %s", strings.Join(command, ", "))
 
 	err = unix.Exec(path, command, os.Environ())
 	if err != nil {

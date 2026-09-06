@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 )
 
 func TestParseStopsAtChildCommand(t *testing.T) {
@@ -18,6 +19,10 @@ func TestParseStopsAtChildCommand(t *testing.T) {
 
 	if !slices.Equal(invocation.Config.Allow, []string{"example.com"}) {
 		t.Errorf("Allow = %v", invocation.Config.Allow)
+	}
+
+	if !invocation.Config.TransparentFallback {
+		t.Error("TransparentFallback = false, want default true")
 	}
 
 	wantCommand := []string{"curl", "-v", "https://example.com"}
@@ -48,6 +53,9 @@ func TestParseMergesConfigAndCLI(t *testing.T) {
 allow: [config.example]
 block: [blocked.example]
 log: debug
+proxy: http://config-proxy.example:8080
+connect_timeout: 20s
+transparent_fallback: false
 allow_unresolved_rules: true
 restrict_sockets: true
 keep_unsafe_capabilities: [CAP_SYS_PTRACE]
@@ -63,7 +71,10 @@ keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 		"--allow", "cli.example",
 		"--block", "cli-blocked.example",
 		"--log", "info",
+		"--proxy", "socks5://cli-proxy.example:1080",
+		"--connect-timeout", "3s",
 		"--allow-unresolved-rules=false",
+		"--disable-transparent-fallback=false",
 		"--restrict-sockets=false",
 		"--keep-unsafe-capability", "CAP_SYS_ADMIN",
 		"command",
@@ -84,8 +95,20 @@ keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 		t.Errorf("Log = %s, want CLI override info", invocation.Config.Log)
 	}
 
+	if invocation.Config.Proxy != "socks5://cli-proxy.example:1080" {
+		t.Errorf("Proxy = %q, want CLI override socks5://cli-proxy.example:1080", invocation.Config.Proxy)
+	}
+
+	if invocation.Config.ConnectTimeout != 3*time.Second {
+		t.Errorf("ConnectTimeout = %s, want CLI override 3s", invocation.Config.ConnectTimeout)
+	}
+
 	if invocation.Config.AllowUnresolvedRules {
 		t.Error("AllowUnresolvedRules = true, want CLI override false")
+	}
+
+	if !invocation.Config.TransparentFallback {
+		t.Error("TransparentFallback = false, want CLI override true")
 	}
 
 	if invocation.Config.RestrictUnixSockets {
@@ -102,12 +125,50 @@ keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 	}
 }
 
+func TestParseDisablesTransparentFallback(t *testing.T) {
+	t.Parallel()
+
+	invocation, err := Parse([]string{"--disable-transparent-fallback", "command"})
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	if invocation.Config.TransparentFallback {
+		t.Error("TransparentFallback = true, want false")
+	}
+}
+
 func TestParseRejectsMissingCommand(t *testing.T) {
 	t.Parallel()
 
 	_, err := Parse([]string{"--allow", "example.com"})
 	if err == nil {
 		t.Fatal("Parse unexpectedly accepted a missing command")
+	}
+}
+
+func TestParseRejectsInvalidConnectTimeout(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]string{"--connect-timeout", "0s", "command"})
+	if err == nil {
+		t.Fatal("Parse unexpectedly accepted a zero connect timeout")
+	}
+}
+
+func TestParseRejectsInvalidConfigConnectTimeout(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "airjail.yaml")
+
+	err := os.WriteFile(configPath, []byte("connect_timeout: 0s\n"), 0o600)
+	if err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err = Parse([]string{"--config", configPath, "command"})
+	if err == nil {
+		t.Fatal("Parse unexpectedly accepted a zero config connect timeout")
 	}
 }
 
@@ -162,13 +223,17 @@ func TestParseSupervisorRejectsMissingCommand(t *testing.T) {
 func TestParseRestrictedExec(t *testing.T) {
 	t.Parallel()
 
-	command, err := ParseRestrictedExec([]string{"--", "command", "--flag"})
+	invocation, err := ParseRestrictedExec([]string{"--log-level", "debug", "--", "command", "--flag"})
 	if err != nil {
 		t.Fatalf("ParseRestrictedExec: %v", err)
 	}
 
-	if !slices.Equal(command, []string{"command", "--flag"}) {
-		t.Errorf("command = %v", command)
+	if invocation.LogLevel != "debug" {
+		t.Errorf("LogLevel = %q, want debug", invocation.LogLevel)
+	}
+
+	if !slices.Equal(invocation.Command, []string{"command", "--flag"}) {
+		t.Errorf("Command = %v", invocation.Command)
 	}
 }
 

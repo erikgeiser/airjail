@@ -7,18 +7,33 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
 
+// DefaultConnectTimeout bounds outbound connection establishment by default.
+const DefaultConnectTimeout = 5 * time.Second
+
 // Config is the effective user configuration.
 type Config struct {
-	Allow                  []string `yaml:"allow"`
-	Block                  []string `yaml:"block"`
-	Log                    string   `yaml:"log"`
-	RestrictUnixSockets    bool     `yaml:"restrict_sockets"`
-	AllowUnresolvedRules   bool     `yaml:"allow_unresolved_rules"`
-	KeepUnsafeCapabilities []string `yaml:"keep_unsafe_capabilities"`
+	Allow                  []string      `yaml:"allow"`
+	Block                  []string      `yaml:"block"`
+	Log                    string        `yaml:"log"`
+	Proxy                  string        `yaml:"proxy"`
+	ConnectTimeout         time.Duration `yaml:"connect_timeout"`
+	TransparentFallback    bool          `yaml:"transparent_fallback"`
+	RestrictUnixSockets    bool          `yaml:"restrict_sockets"`
+	AllowUnresolvedRules   bool          `yaml:"allow_unresolved_rules"`
+	KeepUnsafeCapabilities []string      `yaml:"keep_unsafe_capabilities"`
+}
+
+// Default returns the default configuration.
+func Default() Config {
+	return Config{
+		ConnectTimeout:      DefaultConnectTimeout,
+		TransparentFallback: true,
+	}
 }
 
 // Load reads a strict YAML configuration file.
@@ -31,11 +46,11 @@ func Load(path string) (Config, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(contents))
 	decoder.KnownFields(true)
 
-	var loaded Config
+	loaded := Default()
 
 	err = decoder.Decode(&loaded)
 	if errors.Is(err, io.EOF) {
-		return Config{}, nil
+		return loaded, nil
 	}
 
 	if err != nil {

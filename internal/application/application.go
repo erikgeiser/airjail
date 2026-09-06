@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/erikgeiser/airjail/internal/cli"
 	"github.com/erikgeiser/airjail/internal/logging"
@@ -112,6 +113,9 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 		namespaceMode,
 		invocation.Config.RestrictUnixSockets,
 		invocation.Config.KeepUnsafeCapabilities,
+		invocation.Config.Proxy,
+		invocation.Config.ConnectTimeout,
+		invocation.Config.TransparentFallback,
 		logger,
 	)
 }
@@ -126,8 +130,15 @@ func runWithProxies(
 	namespaceMode namespace.Mode,
 	restrictUnixSockets bool,
 	keepUnsafeCapabilities []string,
+	proxyURL string,
+	connectTimeout time.Duration,
+	transparentFallback bool,
 	logger *logging.Logger,
 ) (int, error) {
+	if !transparentFallback {
+		logger.Infof("transparent fallback disabled: only proxy-aware applications can use network egress")
+	}
+
 	runDir, err := createRuntimeDir(os.Getuid(), os.Getenv("XDG_RUNTIME_DIR"))
 	if err != nil {
 		return 0, err
@@ -178,23 +189,27 @@ func runWithProxies(
 		}
 	}()
 
-	dnsListener, err := listenConfig.Listen(ctx, "unix", runDir.DNSSocket)
-	if err != nil {
-		return 0, fmt.Errorf("listen on outer DNS proxy socket: %w", err)
+	var dnsListener net.Listener
+
+	if transparentFallback {
+		dnsListener, err = listenConfig.Listen(ctx, "unix", runDir.DNSSocket)
+		if err != nil {
+			return 0, fmt.Errorf("listen on outer DNS proxy socket: %w", err)
+		}
+
+		logger.Debugf("DNS proxy listening on %s", runDir.DNSSocket)
+
+		defer func() {
+			err := dnsListener.Close()
+			if err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Warnf("could not close DNS listener: %v", err)
+			} else {
+				logger.Debugf("closed DNS listener")
+			}
+		}()
 	}
 
-	logger.Debugf("DNS proxy listening on %s", runDir.DNSSocket)
-
-	defer func() {
-		err := dnsListener.Close()
-		if err != nil && !errors.Is(err, net.ErrClosed) {
-			logger.Warnf("could not close DNS listener: %v", err)
-		} else {
-			logger.Debugf("closed DNS listener")
-		}
-	}()
-
-	router, err := outbound.NewEnvironmentRouter(os.Environ())
+	router, err := outbound.NewProxyAwareRouter(os.Environ(), proxyURL, connectTimeout)
 	if err != nil {
 		return 0, err
 	}
@@ -202,19 +217,23 @@ func runWithProxies(
 	connector := outbound.NewRouted(networkPolicy, nil, router.Dial, logger)
 	httpServer := proxyhttp.New(connector.WithLoggerPrefix("HTTP proxy"))
 
-	socksServer, err := proxysocks.New(connector.WithLoggerPrefix("SOCKS proxy"))
+	socksServer, err := proxysocks.New(connector.WithLoggerPrefix("SOCKS proxy"), connectTimeout)
 	if err != nil {
 		return 0, err
 	}
 
-	dnsUpstream, err := proxydns.NewSystemUpstream("/etc/resolv.conf")
-	if err != nil {
-		return 0, err
-	}
+	var dnsServer *proxydns.Server
 
-	dnsServer, err := proxydns.New(networkPolicy, dnsUpstream, logger.WithPrefix("DNS proxy"))
-	if err != nil {
-		return 0, err
+	if transparentFallback {
+		dnsUpstream, upstreamErr := proxydns.NewSystemUpstream("/etc/resolv.conf")
+		if upstreamErr != nil {
+			return 0, upstreamErr
+		}
+
+		dnsServer, err = proxydns.New(networkPolicy, dnsUpstream, logger.WithPrefix("DNS proxy"))
+		if err != nil {
+			return 0, err
+		}
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -243,7 +262,10 @@ func runWithProxies(
 
 	serverGroup.Go(runServer("HTTP", httpListener, httpServer.Serve))
 	serverGroup.Go(runServer("SOCKS", socksListener, socksServer.Serve))
-	serverGroup.Go(runServer("DNS", dnsListener, dnsServer.Serve))
+
+	if transparentFallback {
+		serverGroup.Go(runServer("DNS", dnsListener, dnsServer.Serve))
+	}
 
 	serverResults := make(chan error, 1)
 	go func() {
@@ -257,6 +279,11 @@ func runWithProxies(
 
 	commandResults := make(chan commandResult, 1)
 
+	dnsSocket := ""
+	if transparentFallback {
+		dnsSocket = runDir.DNSSocket
+	}
+
 	go func() {
 		exitCode, runErr := namespace.Run(serverCtx, namespace.ParentOptions{
 			Executable:             executable,
@@ -265,11 +292,11 @@ func runWithProxies(
 			Directory:              workingDirectory,
 			HTTPSocket:             runDir.HTTPSocket,
 			SOCKSocket:             runDir.SOCKSocket,
-			DNSSocket:              runDir.DNSSocket,
+			DNSSocket:              dnsSocket,
 			Mode:                   namespaceMode,
 			RestrictUnixSockets:    restrictUnixSockets,
 			KeepUnsafeCapabilities: keepUnsafeCapabilities,
-			TransparentTCP:         true,
+			TransparentTCP:         transparentFallback,
 			Logger:                 logger,
 		})
 		commandResults <- commandResult{exitCode: exitCode, err: runErr}
@@ -283,9 +310,11 @@ func runWithProxies(
 	select {
 	case result = <-commandResults:
 		cancel()
+
 		serverErr = <-serverResults
 	case serverErr = <-serverResults:
 		cancel()
+
 		result = <-commandResults
 	}
 

@@ -208,7 +208,7 @@ type SupervisorOptions struct {
 	Logger                 *logging.Logger
 }
 
-// RunSupervisor configures loopback, starts bridges, and supervises the command.
+//nolint:maintidx
 func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) {
 	options.Logger = options.Logger.WithPrefix("supervisor")
 
@@ -391,7 +391,13 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 				return nil
 			}
 
-			command = append([]string{executable, cli.RestrictedExecCommand, "--"}, command...)
+			command = append([]string{
+				executable,
+				cli.RestrictedExecCommand,
+				"--" + cli.RestrictedExecLogLevelOption,
+				options.Logger.LevelName(),
+				"--",
+			}, command...)
 		}
 
 		childExitCode, childErr = runSandboxedProcess(groupCtx, command, runOptions{

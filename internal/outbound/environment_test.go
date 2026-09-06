@@ -11,7 +11,9 @@ import (
 	"testing"
 )
 
-func TestEnvironmentRouterHTTPConnectPreservesImmediateTunnelBytes(t *testing.T) {
+const deadProxyEnvironment = "HTTPS_PROXY=http://127.0.0.1:1"
+
+func TestProxyAwareRouterConfiguredProxyTakesPrecedence(t *testing.T) {
 	t.Parallel()
 
 	listener := listenTCP(t)
@@ -71,9 +73,13 @@ func TestEnvironmentRouterHTTPConnectPreservesImmediateTunnelBytes(t *testing.T)
 		}
 	}()
 
-	router, err := NewEnvironmentRouter([]string{"HTTPS_PROXY=http://user:secret@" + listener.Addr().String()})
+	router, err := NewProxyAwareRouter(
+		[]string{deadProxyEnvironment},
+		"http://user:secret@"+listener.Addr().String(),
+		defaultConnectTimeout,
+	)
 	if err != nil {
-		t.Fatalf("NewEnvironmentRouter: %v", err)
+		t.Fatalf("NewProxyAwareRouter: %v", err)
 	}
 
 	connection, err := router.Dial(
@@ -102,7 +108,7 @@ func TestEnvironmentRouterHTTPConnectPreservesImmediateTunnelBytes(t *testing.T)
 	<-requestDone
 }
 
-func TestEnvironmentRouterHonorsNoProxy(t *testing.T) {
+func TestProxyAwareRouterHonorsNoProxy(t *testing.T) {
 	t.Parallel()
 
 	target := listenTCP(t)
@@ -122,12 +128,12 @@ func TestEnvironmentRouterHonorsNoProxy(t *testing.T) {
 
 	port := uint16(tcpAddress.Port)
 
-	router, err := NewEnvironmentRouter([]string{
-		"HTTPS_PROXY=http://127.0.0.1:1",
+	router, err := NewProxyAwareRouter([]string{
+		deadProxyEnvironment,
 		"NO_PROXY=service.example",
-	})
+	}, "", defaultConnectTimeout)
 	if err != nil {
-		t.Fatalf("NewEnvironmentRouter: %v", err)
+		t.Fatalf("NewProxyAwareRouter: %v", err)
 	}
 
 	connection, err := router.Dial(
@@ -146,7 +152,7 @@ func TestEnvironmentRouterHonorsNoProxy(t *testing.T) {
 	_ = serverConnection.Close()
 }
 
-func TestEnvironmentRouterAlwaysDialsLoopbackDirectly(t *testing.T) {
+func TestProxyAwareRouterAlwaysDialsLoopbackDirectly(t *testing.T) {
 	t.Parallel()
 
 	target := listenTCP(t)
@@ -164,9 +170,13 @@ func TestEnvironmentRouterAlwaysDialsLoopbackDirectly(t *testing.T) {
 		t.Fatalf("listener address has type %T, want *net.TCPAddr", target.Addr())
 	}
 
-	router, err := NewEnvironmentRouter([]string{"HTTPS_PROXY=http://127.0.0.1:1"})
+	router, err := NewProxyAwareRouter(
+		[]string{deadProxyEnvironment},
+		"",
+		defaultConnectTimeout,
+	)
 	if err != nil {
-		t.Fatalf("NewEnvironmentRouter: %v", err)
+		t.Fatalf("NewProxyAwareRouter: %v", err)
 	}
 
 	connection, err := router.Dial(
@@ -184,12 +194,21 @@ func TestEnvironmentRouterAlwaysDialsLoopbackDirectly(t *testing.T) {
 	_ = serverConnection.Close()
 }
 
-func TestEnvironmentRouterRejectsMalformedProxyURL(t *testing.T) {
+func TestProxyAwareRouterRejectsMalformedProxyURL(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewEnvironmentRouter([]string{"HTTPS_PROXY=http://proxy.example/path"})
+	_, err := NewProxyAwareRouter([]string{"HTTPS_PROXY=http://proxy.example/path"}, "", defaultConnectTimeout)
 	if err == nil {
-		t.Fatal("NewEnvironmentRouter unexpectedly accepted a proxy URL path")
+		t.Fatal("NewProxyAwareRouter unexpectedly accepted a proxy URL path")
+	}
+}
+
+func TestProxyAwareRouterRejectsInvalidConnectTimeout(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewProxyAwareRouter(nil, "", 0)
+	if err == nil {
+		t.Fatal("NewProxyAwareRouter unexpectedly accepted a zero connect timeout")
 	}
 }
 

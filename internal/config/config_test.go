@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoad(t *testing.T) {
@@ -15,6 +16,9 @@ allow:
 block:
   - "*.blocked.example:443"
 log: debug
+proxy: http://proxy.example:8080
+connect_timeout: 3s
+transparent_fallback: false
 allow_unresolved_rules: true
 restrict_sockets: true
 keep_unsafe_capabilities: [CAP_SYS_ADMIN]
@@ -37,6 +41,18 @@ keep_unsafe_capabilities: [CAP_SYS_ADMIN]
 		t.Errorf("Log = %s, want debug", loaded.Log)
 	}
 
+	if loaded.Proxy != "http://proxy.example:8080" {
+		t.Errorf("Proxy = %q, want http://proxy.example:8080", loaded.Proxy)
+	}
+
+	if loaded.ConnectTimeout != 3*time.Second {
+		t.Errorf("ConnectTimeout = %s, want 3s", loaded.ConnectTimeout)
+	}
+
+	if loaded.TransparentFallback {
+		t.Error("TransparentFallback = true, want false")
+	}
+
 	if !loaded.AllowUnresolvedRules {
 		t.Error("AllowUnresolvedRules = false, want true")
 	}
@@ -47,6 +63,19 @@ keep_unsafe_capabilities: [CAP_SYS_ADMIN]
 
 	if len(loaded.KeepUnsafeCapabilities) != 1 || loaded.KeepUnsafeCapabilities[0] != "CAP_SYS_ADMIN" {
 		t.Errorf("KeepUnsafeCapabilities = %v", loaded.KeepUnsafeCapabilities)
+	}
+}
+
+func TestLoadAppliesDefaults(t *testing.T) {
+	t.Parallel()
+
+	loaded, err := Load(writeConfig(t, "{}\n"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if !loaded.TransparentFallback {
+		t.Error("TransparentFallback = false, want default true")
 	}
 }
 

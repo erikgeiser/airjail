@@ -83,8 +83,8 @@ func TestDirectDialsOnlyApprovedResolvedAddress(t *testing.T) {
 		t.Errorf("dialed address = %q, want 192.0.2.10:443", dialedAddress)
 	}
 
-	wantLog := "airjail: blocked: tcp service.example:443 (10.0.0.1)\n" +
-		"airjail: allowed: tcp service.example:443 (192.0.2.10)\n"
+	wantLog := "airjail: traffic: blocked: service.example:443 (10.0.0.1)\n" +
+		"airjail: traffic: allowed: service.example:443 (192.0.2.10)\n"
 	if logOutput.String() != wantLog {
 		t.Errorf("log output = %q, want %q", logOutput.String(), wantLog)
 	}

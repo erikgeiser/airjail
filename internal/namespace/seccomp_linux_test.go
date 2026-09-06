@@ -72,7 +72,7 @@ func TestExecRestrictedProcess(t *testing.T) {
 	case "launch":
 		t.Setenv(seccompTestStage, "check")
 
-		err := ExecRestricted([]string{os.Args[0], fmt.Sprintf("-test.run=^%s$", t.Name())})
+		err := ExecRestricted([]string{os.Args[0], fmt.Sprintf("-test.run=^%s$", t.Name())}, nil)
 		fmt.Fprintf(os.Stderr, "ExecRestricted: %v\n", err)
 		os.Exit(2)
 	case "check":

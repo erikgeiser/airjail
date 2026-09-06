@@ -135,7 +135,15 @@ block:
   - "127.0.0.1:53"
 restrict_sockets: true
 allow_unresolved_rules: false
+proxy: http://proxy.example:8080
+connect_timeout: 5s
+transparent_fallback: false
 ```
+
+Transparent TCP and filtered DNS are enabled by default for non-empty policies.
+Use `--disable-transparent-fallback` or `transparent_fallback: false` for
+proxy-only operation. In that mode, applications that ignore the injected HTTP
+and SOCKS proxy settings have no network egress.
 
 ## Building
 
@@ -165,13 +173,14 @@ are lost. If `airjail` is invoked without any configuration, this is all it
 does. However, if rules are present, it creates a SOCKS and an HTTP/HTTPS proxy
 outside of the namespace that each listen on a Unix domain socket and only proxy
 allowed traffic. Inside the namespace, TCP listeners forward proxy-aware traffic
-to those sockets. nftables redirects other TCP connections to a transparent
-listener, which obtains the original destination and connects to it through the
-same policy-enforcing SOCKS server. Proxy environment variables continue to let
-proxy-aware programs provide destination hostnames directly. For non-proxy-aware
-programs, nftables redirects DNS over TCP and UDP to a filtered outer resolver.
-Approved A and AAAA responses temporarily associate their addresses with matching
-hostname rules before transparent TCP connections are permitted.
+to those sockets. Unless transparent fallback is disabled, nftables redirects
+other TCP connections to a transparent listener, which obtains the original
+destination and connects to it through the same policy-enforcing SOCKS server.
+Proxy environment variables continue to let proxy-aware programs provide
+destination hostnames directly. For non-proxy-aware programs, nftables redirects
+DNS over TCP and UDP to a filtered outer resolver. Approved A and AAAA responses
+temporarily associate their addresses with matching hostname rules before
+transparent TCP connections are permitted.
 
 The opt-in feature to restrict local sockets loads `seccomp` `BPF` rules that
 are assembled in pure Go. These rules restrict access to the syscalls `socket`

@@ -22,6 +22,19 @@ func (connector connectorFunc) Dial(
 	return connector(ctx, destination, port)
 }
 
+func TestNewRejectsInvalidConnectTimeout(t *testing.T) {
+	t.Parallel()
+
+	connector := connectorFunc(func(context.Context, policy.Destination, uint16) (net.Conn, error) {
+		return nil, nil
+	})
+
+	_, err := New(connector, 0)
+	if err == nil {
+		t.Fatal("New unexpectedly accepted a zero connect timeout")
+	}
+}
+
 func TestNegotiateAuthenticationRejectsUnsupportedMethods(t *testing.T) {
 	t.Parallel()
 
@@ -77,7 +90,7 @@ func TestSOCKSHostnameConnectPreservesPipelinedBytes(t *testing.T) {
 		return (&net.Dialer{}).DialContext(ctx, "tcp", target.Addr().String())
 	})
 
-	server, err := New(connector)
+	server, err := New(connector, 5*time.Second)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

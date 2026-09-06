@@ -32,12 +32,17 @@ func run(ctx context.Context, args []string) (int, error) {
 		case cli.SupervisorCommand:
 			return runSupervisor(ctx, args[1:])
 		case cli.RestrictedExecCommand:
-			command, err := cli.ParseRestrictedExec(args[1:])
+			invocation, err := cli.ParseRestrictedExec(args[1:])
 			if err != nil {
 				return 0, err
 			}
 
-			return 0, namespace.ExecRestricted(command)
+			logger, err := logging.New(os.Stderr, invocation.LogLevel, "restricted exec")
+			if err != nil {
+				return 0, fmt.Errorf("setup restricted-exec logger: %w", err)
+			}
+
+			return 0, namespace.ExecRestricted(invocation.Command, logger)
 		}
 	}
 

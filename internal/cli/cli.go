@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/erikgeiser/airjail/internal/config"
 	"github.com/spf13/pflag"
@@ -13,6 +14,7 @@ import (
 const (
 	SupervisorCommand                   = "__netns-supervisor"
 	RestrictedExecCommand               = "__restricted-exec"
+	RestrictedExecLogLevelOption        = "log-level"
 	SupervisorHTTPSocketOption          = "http-socket"
 	SupervisorSOCKSSocketOption         = "socks-socket"
 	SupervisorDNSSocketOption           = "dns-socket"
@@ -32,6 +34,12 @@ type Invocation struct {
 	Version bool
 }
 
+// RestrictedExecInvocation contains configuration for the hidden restricted-exec command.
+type RestrictedExecInvocation struct {
+	Command  []string
+	LogLevel string
+}
+
 // SupervisorInvocation contains configuration for the hidden namespace supervisor command.
 type SupervisorInvocation struct {
 	Command                []string
@@ -47,14 +55,17 @@ type SupervisorInvocation struct {
 }
 
 type flagValues struct {
-	configPath             string
-	allowRules             []string
-	blockRules             []string
-	logLevel               string
-	allowUnresolved        bool
-	restrictUnixSockets    bool
-	keepUnsafeCapabilities []string
-	version                bool
+	configPath                 string
+	allowRules                 []string
+	blockRules                 []string
+	logLevel                   string
+	proxy                      string
+	connectTimeout             time.Duration
+	allowUnresolved            bool
+	disableTransparentFallback bool
+	restrictUnixSockets        bool
+	keepUnsafeCapabilities     []string
+	version                    bool
 }
 
 func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
@@ -66,8 +77,13 @@ func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
 	flags.StringArrayVar(&values.blockRules, "block", nil, "Blocked `destination` (repeatable)")
 	flags.StringVarP(&values.logLevel, "log", "l", "warning",
 		"Log messages with this `level` or lower (silent < warning < traffic < info < debug)")
+	flags.StringVar(&values.proxy, "proxy", "", "Outer proxy `URL`")
+	flags.DurationVar(&values.connectTimeout, "connect-timeout", config.DefaultConnectTimeout,
+		"Maximum outbound connection establishment `duration`")
 	flags.BoolVar(&values.allowUnresolved, "allow-unresolved-rules", false,
 		"Do not fail when destination hostname does not resolve")
+	flags.BoolVar(&values.disableTransparentFallback, "disable-transparent-fallback", false,
+		"Disable transparent TCP and DNS interception")
 	flags.BoolVar(&values.restrictUnixSockets, "restrict-sockets", false,
 		"Restrict creation of Unix and vsock sockets")
 	flags.StringArrayVar(&values.keepUnsafeCapabilities, "keep-unsafe-capability", nil,
@@ -133,16 +149,25 @@ func ParseSupervisor(args []string) (SupervisorInvocation, error) {
 }
 
 // ParseRestrictedExec parses the hidden restricted-exec command line.
-func ParseRestrictedExec(args []string) ([]string, error) {
-	if len(args) > 0 && args[0] == "--" {
-		args = args[1:]
+func ParseRestrictedExec(args []string) (RestrictedExecInvocation, error) {
+	flags := pflag.NewFlagSet(RestrictedExecCommand, pflag.ContinueOnError)
+	flags.SetInterspersed(false)
+	flags.SetOutput(io.Discard)
+
+	invocation := RestrictedExecInvocation{}
+	flags.StringVar(&invocation.LogLevel, RestrictedExecLogLevelOption, "warning", "log level")
+
+	err := flags.Parse(args)
+	if err != nil {
+		return RestrictedExecInvocation{}, fmt.Errorf("parse restricted-exec flags: %w", err)
 	}
 
-	if len(args) == 0 {
-		return nil, fmt.Errorf("restricted child command is required")
+	invocation.Command = flags.Args()
+	if len(invocation.Command) == 0 {
+		return RestrictedExecInvocation{}, fmt.Errorf("restricted child command is required")
 	}
 
-	return args, nil
+	return invocation, nil
 }
 
 // WriteHelp prints public command usage.
@@ -172,7 +197,7 @@ func Parse(args []string) (Invocation, error) {
 		return Invocation{Version: true}, nil
 	}
 
-	effective := config.Config{}
+	effective := config.Default()
 
 	if values.configPath != "" {
 		loaded, err := config.Load(values.configPath)
@@ -196,8 +221,24 @@ func Parse(args []string) (Invocation, error) {
 		effective.Log = values.logLevel
 	}
 
+	if flags.Changed("proxy") {
+		effective.Proxy = values.proxy
+	}
+
+	if flags.Changed("connect-timeout") || values.configPath == "" {
+		effective.ConnectTimeout = values.connectTimeout
+	}
+
+	if effective.ConnectTimeout <= 0 {
+		return Invocation{}, fmt.Errorf("connect timeout must be greater than zero")
+	}
+
 	if flags.Changed("allow-unresolved-rules") {
 		effective.AllowUnresolvedRules = values.allowUnresolved
+	}
+
+	if flags.Changed("disable-transparent-fallback") {
+		effective.TransparentFallback = !values.disableTransparentFallback
 	}
 
 	if flags.Changed("restrict-sockets") {
