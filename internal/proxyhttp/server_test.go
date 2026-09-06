@@ -30,8 +30,7 @@ func (connector connectorFunc) Dial(
 func TestConnectPreservesPipelinedNonTLSBytes(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	destinationListener := listenTCP(t)
 	destinationDone := make(chan error, 1)
@@ -133,8 +132,7 @@ func TestPlainHTTPForwarding(t *testing.T) {
 		t.Fatalf("parse target URL: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	connector := connectorFunc(func(ctx context.Context, destination policy.Destination, port uint16) (net.Conn, error) {
 		if destination.Hostname() != "service.test" || port != 8080 {
@@ -192,8 +190,7 @@ func TestParseAuthorityPreservesIPv6Zone(t *testing.T) {
 func TestDeniedConnectReturnsForbidden(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	connector := connectorFunc(func(context.Context, policy.Destination, uint16) (net.Conn, error) {
 		return nil, outbound.ErrDenied

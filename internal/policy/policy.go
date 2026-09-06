@@ -106,7 +106,7 @@ func resolveHostRules(
 		if rule.configuredSnapshot {
 			for _, address := range rule.resolved {
 				options.Logger.Infof(
-					"using configured %s snapshot %s to %s",
+					"applying static %s rule resolving %s to %s",
 					kind,
 					formatHostRule(*rule),
 					formatAddressRule(address, rule.port),

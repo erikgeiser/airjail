@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/erikgeiser/airjail/internal/outbound"
@@ -183,12 +184,8 @@ func negotiateAuthentication(reader io.Reader, writer io.Writer) error {
 
 	selected := byte(socksNoAcceptableAuth)
 
-	for _, method := range methods {
-		if method == socksNoAuthentication {
-			selected = socksNoAuthentication
-
-			break
-		}
+	if slices.Contains(methods, socksNoAuthentication) {
+		selected = socksNoAuthentication
 	}
 
 	err = writeAll(writer, []byte{socksVersion, selected})

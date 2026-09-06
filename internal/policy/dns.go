@@ -32,15 +32,15 @@ func (policy *Policy) BeginResolution(rawHostname string, now time.Time) (Resolu
 
 	policy.dynamic.removeExpired(now)
 
-	origins := policy.resolutionOriginsLocked(hostname)
-	if policy.mayResolveLocked(hostname, origins) {
-		return ResolutionAuthorization{query: hostname, origins: origins}, true, nil
+	policyOrigins := policy.resolutionPolicyCandidates(hostname)
+	if policy.mayResolve(hostname, policyOrigins) {
+		return ResolutionAuthorization{query: hostname, origins: policyOrigins}, true, nil
 	}
 
 	return ResolutionAuthorization{}, false, nil
 }
 
-func (policy *Policy) resolutionOriginsLocked(hostname string) []string {
+func (policy *Policy) resolutionPolicyCandidates(hostname string) []string {
 	origins := []string{hostname}
 	for origin := range policy.dynamic.aliases[hostname] {
 		if !slices.Contains(origins, origin) {
@@ -120,7 +120,7 @@ func (policy *Policy) installResolutionGrantsLocked(
 	policy.dynamic.enforceLimit()
 }
 
-func (policy *Policy) mayResolveLocked(query string, origins []string) bool {
+func (policy *Policy) mayResolve(query string, origins []string) bool {
 	if policy.block.matchesHostnameOnAllPorts(query) {
 		return false
 	}

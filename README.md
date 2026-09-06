@@ -27,7 +27,7 @@ It follows these design principles:
   `firejail` or `bubblewrap` and both of these tools can be combined with
   `airjail` for exhaustive sandboxing. The only exception in `airjail` is
   blocking access to Unix domain and vsock sockets, which is an opt-in feature
-  intended to support the network isolation in certain scenarios.
+  intended as support for the actual network isolation in certain scenarios.
 - **Transparent:** `airjail` aims to act like a transparent shim that interferes
   with the execution of the program as little as possible. It is therefore
   designed to provide the same experience regarding
@@ -39,8 +39,8 @@ It follows these design principles:
   capabilities that could bypass isolation or compromise the kernel. Without
   namespace setup capabilities, the process only loses supplementary groups
   except for the primary user group, which should not matter in most cases.
-- **Easy to Use:** `airjail` is a single dependency-free binary that can easily
-  be (cross-)compiled as it does not depend on `cgo`.
+- **Easy to Use:** `airjail` is a single runtime-dependency-free binary that can
+  easily be (cross-)compiled as it does not depend on `cgo`.
 
 ## Configuration
 
@@ -64,14 +64,12 @@ YAML config. It can be used in the modes:
 Each rule can reference destinations in multiple ways:
 
 - **IP Address:** References a single IP, for example `--allow 10.0.0.1`.
-- **CIDR Network:** References an entire network, for example `--allow 10.0.0.1/8`
-- **Hostname:** Exact hostnames are resolved once at startup. Complete chained
-  CNAME aliases and terminal addresses become an immutable snapshot for the
-  invocation. If the hostname does not resolve, `airjail` returns an error
-  unless `--allow-unresolved-rules` or `allow_unresolved_rules: true` is set.
-  A snapshot can instead be supplied directly, avoiding the lookup, for example
-  `--allow 'foo.bar@10.0.0.1@fe80::1'` or
-  `--allow 'foo.bar:443@10.0.0.1@fe80::1'`.
+- **CIDR Network:** References an entire network, for example `--allow 10.0.0.1/8`.
+- **Hostname:** Exact hostnames are resolved once at startup. If the hostname
+  does not resolve, `airjail` returns an error unless `--allow-unresolved-rules`
+  or `allow_unresolved_rules: true` is set. A static snapshot can instead be
+  supplied directly, avoiding the lookup, for example
+  `'example.com@10.0.0.1@fe80::1'`.
 - **Wildcard:** Hostnames can be specified with a wildcard `*`. This can be used
   to reference all subdomains (`--allow '*.example.com'`). In this case, it
   matches `sub.example.com`, but not `example.com`. Since wildcards cannot be
@@ -121,7 +119,7 @@ separated with `--` for clarity. The following two invocations are identical:
 $ airjail \
     --allow "127.0.0.1/8" --allow "example.com" --allow '*.example.com' \
     --block "bad.example.com" --block "127.0.0.1:53" \
-    --restrict-sockets \
+    --restrict-sockets --disable-transparent-fallback \
     program -flag-a arg-b
 $ airjail --config airjail.yml -- program -flag-a arg-b
 ```
@@ -171,6 +169,14 @@ The following command runs all tests but has to be executed on Linux:
 
 ```sh
 go test ./...
+```
+
+When contributing to this repository, please check and format your code with
+`golangci-lint`:
+
+```sh
+golangci-lint fmt ./...
+golangci-lint run ./...
 ```
 
 ## Technical Design and Implementation
@@ -271,9 +277,9 @@ isolation may still be desired in order to avoid the following issues:
 
 ## Roadmap and Missing Features
 
-- **Additional DNS and UDP support:** Filtered DNS currently supports A and
-  AAAA queries with CNAME chains. HTTPS/SVCB records for ECH, arbitrary UDP,
-  and upstream SOCKS5 UDP ASSOCIATE support are planned afterwards.
+- **Extensive DNS and UDP support:** Filtered DNS currently supports A and AAAA
+  queries with CNAME chains. HTTPS/SVCB records for ECH, arbitrary UDP, and
+  upstream SOCKS5 UDP ASSOCIATE support are planned afterwards.
 - **Inbound Traffic:** Currently `airjail` prevents other processes from
   accessing ports opened by the sandboxed process. An `--expose` option is
   planned that forwards out-of-namespace traffic into the sandbox.

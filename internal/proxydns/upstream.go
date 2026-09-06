@@ -42,14 +42,7 @@ func NewSystemUpstream(path string) (*SystemUpstream, error) {
 		timeout = 10 * time.Second
 	}
 
-	attempts := configuration.Attempts
-	if attempts < 1 {
-		attempts = 1
-	}
-
-	if attempts > 3 {
-		attempts = 3
-	}
+	attempts := min(max(configuration.Attempts, 1), 3)
 
 	return &SystemUpstream{
 		servers:  append([]string(nil), configuration.Servers...),

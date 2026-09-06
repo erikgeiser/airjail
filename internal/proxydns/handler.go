@@ -89,14 +89,7 @@ func (server *Server) handle(ctx context.Context, wireRequest []byte) []byte {
 
 	server.logger.Allowf(dns.TypeToString[query.queryType] + " " + query.hostname)
 
-	ttlDuration := time.Until(result.ExpiresAt)
-	if ttlDuration < minimumGrantTTL {
-		ttlDuration = minimumGrantTTL
-	}
-
-	if ttlDuration > maximumGrantTTL {
-		ttlDuration = maximumGrantTTL
-	}
+	ttlDuration := min(max(time.Until(result.ExpiresAt), minimumGrantTTL), maximumGrantTTL)
 
 	return packAddressResponse(query, result.Addresses, uint32(ttlDuration/time.Second))
 }

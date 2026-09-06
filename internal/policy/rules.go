@@ -321,7 +321,7 @@ func NormalizeHostname(rawHostname string) (string, error) {
 		return "", fmt.Errorf("hostname exceeds 253 bytes")
 	}
 
-	for _, label := range strings.Split(asciiHostname, ".") {
+	for label := range strings.SplitSeq(asciiHostname, ".") {
 		err := validateHostnameLabel(label)
 		if err != nil {
 			return "", err

@@ -1,11 +1,11 @@
 module github.com/erikgeiser/airjail
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/elastic/go-seccomp-bpf v1.6.0
 	github.com/google/nftables v0.3.0
-	github.com/miekg/dns v1.1.68
+	github.com/miekg/dns v1.1.73
 	github.com/spf13/pflag v1.0.10
 	github.com/vishvananda/netlink v1.3.1
 	go.yaml.in/yaml/v3 v3.0.5
@@ -16,11 +16,9 @@ require (
 )
 
 require (
-	github.com/google/go-cmp v0.6.0 // indirect
-	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
-	github.com/mdlayher/socket v0.5.0 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/mdlayher/netlink v1.11.2 // indirect
+	github.com/mdlayher/socket v0.7.0 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
-	golang.org/x/mod v0.38.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
-	golang.org/x/tools v0.48.0 // indirect
 )
