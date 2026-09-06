@@ -559,15 +559,7 @@ func createDNSBridgeServers(
 			return nil, nil, err
 		}
 
-		responseWriter, err := createDNSUDPResponseWriter(ctx, endpoint.udpNetwork, endpoint.ipv6)
-		if err != nil {
-			_ = udpConnection.Close()
-
-			closeBridgeListeners(servers)
-			closeDNSPacketServers(packetServers)
-
-			return nil, nil, err
-		}
+		responseWriter := createDNSUDPResponseWriter(udpConnection, endpoint.ipv6)
 
 		packetServers = append(packetServers, dnsPacketServer{
 			connection:      udpConnection,

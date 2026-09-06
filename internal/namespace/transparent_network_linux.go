@@ -110,6 +110,13 @@ func addTransparentTable(
 		Priority: nftables.ChainPriorityMangle,
 		Type:     nftables.ChainTypeFilter,
 	})
+	postroutingChain := connection.AddChain(&nftables.Chain{
+		Name:     "postrouting",
+		Table:    table,
+		Hooknum:  nftables.ChainHookPostrouting,
+		Priority: nftables.ChainPriorityMangle,
+		Type:     nftables.ChainTypeFilter,
+	})
 
 	for _, port := range exemptPorts {
 		connection.AddRule(&nftables.Rule{
@@ -126,6 +133,18 @@ func addTransparentTable(
 		Table: table,
 		Chain: preroutingChain,
 		Exprs: transparentDNSUDPExpressions(family),
+	})
+
+	// The DNS gateway binds its unprivileged internal port and selects the
+	// originally requested resolver address as the response source. Connected
+	// DNS clients also require source port 53, so rewrite it on every response
+	// without requiring CAP_NET_BIND_SERVICE in the supervisor. This is a
+	// stateless payload rewrite rather than SNAT because these local TPROXY
+	// responses do not have a conventional forwarded conntrack flow.
+	connection.AddRule(&nftables.Rule{
+		Table: table,
+		Chain: postroutingChain,
+		Exprs: dnsUDPResponsePortExpressions(),
 	})
 
 	connection.AddRule(&nftables.Rule{
@@ -162,6 +181,30 @@ func transparentDNSUDPExpressions(family nftables.TableFamily) []expr.Any {
 			Family:      byte(family),
 			TableFamily: byte(family),
 			RegPort:     1,
+		},
+	}
+}
+
+func dnsUDPResponsePortExpressions() []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_UDP}},
+		&expr.Payload{
+			DestRegister: 1,
+			Base:         expr.PayloadBaseTransportHeader,
+			Offset:       0,
+			Len:          2,
+		},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: binaryutil.BigEndian.PutUint16(dnsPort)},
+		&expr.Immediate{Register: 1, Data: binaryutil.BigEndian.PutUint16(53)},
+		&expr.Payload{
+			OperationType:  expr.PayloadWrite,
+			SourceRegister: 1,
+			Base:           expr.PayloadBaseTransportHeader,
+			Offset:         0,
+			Len:            2,
+			CsumType:       expr.CsumTypeInet,
+			CsumOffset:     6,
 		},
 	}
 }

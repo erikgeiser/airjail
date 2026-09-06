@@ -128,12 +128,10 @@ func (dynamic *dynamicPolicy) oldestGrantRemoval() func() {
 	}
 
 	for key, expires := range dynamic.allow {
-
 		consider(expires, func() { delete(dynamic.allow, key) })
 	}
 
 	for key, expires := range dynamic.block {
-
 		consider(expires, func() { delete(dynamic.block, key) })
 	}
 

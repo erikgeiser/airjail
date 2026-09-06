@@ -3,9 +3,12 @@ package namespace
 import (
 	"encoding/binary"
 	"net/netip"
+	"slices"
 	"testing"
 	"unsafe"
 
+	"github.com/google/nftables/binaryutil"
+	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
 )
 
@@ -64,6 +67,32 @@ func TestParseOriginalDestinationRejectsMalformedAddress(t *testing.T) {
 				t.Fatal("parseOriginalDestination unexpectedly accepted malformed input")
 			}
 		})
+	}
+}
+
+func TestDNSUDPResponseRewriteRestoresResolverPort(t *testing.T) {
+	t.Parallel()
+
+	expressions := dnsUDPResponsePortExpressions()
+	if len(expressions) != 6 {
+		t.Fatalf("expression count = %d, want 6", len(expressions))
+	}
+
+	sourcePort, ok := expressions[2].(*expr.Payload)
+	if !ok || sourcePort.Base != expr.PayloadBaseTransportHeader || sourcePort.Offset != 0 || sourcePort.Len != 2 {
+		t.Fatalf("source-port expression = %#v", expressions[2])
+	}
+
+	translatedPort, ok := expressions[4].(*expr.Immediate)
+	if !ok || !slices.Equal(translatedPort.Data, binaryutil.BigEndian.PutUint16(53)) {
+		t.Fatalf("translated-port expression = %#v", expressions[4])
+	}
+
+	rewrite, ok := expressions[5].(*expr.Payload)
+	if !ok || rewrite.OperationType != expr.PayloadWrite || rewrite.SourceRegister != 1 ||
+		rewrite.Base != expr.PayloadBaseTransportHeader || rewrite.Offset != 0 || rewrite.Len != 2 ||
+		rewrite.CsumType != expr.CsumTypeInet || rewrite.CsumOffset != 6 {
+		t.Fatalf("source-port rewrite expression = %#v", expressions[5])
 	}
 }
 

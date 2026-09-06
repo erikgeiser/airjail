@@ -72,7 +72,7 @@ func (policy *Policy) CommitResolution(
 	defer policy.dynamic.mutex.Unlock()
 
 	policy.dynamic.removeExpired(now)
-	policy.installResolutionGrantsLocked(authorization.origins, chain, addresses, result.ExpiresAt)
+	policy.installResolutionGrants(authorization.origins, chain, addresses, result.ExpiresAt)
 
 	return true, nil
 }
@@ -95,7 +95,7 @@ func normalizeResolutionChain(query string, rawChain []string) ([]string, error)
 	return chain, nil
 }
 
-func (policy *Policy) installResolutionGrantsLocked(
+func (policy *Policy) installResolutionGrants(
 	origins []string,
 	chain []string,
 	addresses []netip.Addr,

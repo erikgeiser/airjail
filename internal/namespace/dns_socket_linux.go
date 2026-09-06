@@ -59,26 +59,18 @@ func createDNSUDPQuerySocket(ctx context.Context, network string, ipv6Destinatio
 	return listenTransparentUDPSocket(ctx, network, address, ipv6Destination)
 }
 
+// Responses share the unprivileged query socket. The writer selects the
+// originally requested resolver IP, while nftables rewrites source port 19053
+// back to 53 so connected DNS clients accept the response.
 func createDNSUDPResponseWriter(
-	ctx context.Context,
-	network string,
+	connection *net.UDPConn,
 	ipv6Destination bool,
-) (dnsUDPResponseWriter, error) {
-	address := "0.0.0.0:53"
+) dnsUDPResponseWriter {
 	if ipv6Destination {
-		address = "[::]:53"
+		return dnsIPv6ResponseWriter{connection: ipv6.NewPacketConn(connection)}
 	}
 
-	udpConnection, err := listenTransparentUDPSocket(ctx, network, address, ipv6Destination)
-	if err != nil {
-		return nil, fmt.Errorf("listen on transparent DNS UDP response socket %s: %w", address, err)
-	}
-
-	if ipv6Destination {
-		return dnsIPv6ResponseWriter{connection: ipv6.NewPacketConn(udpConnection)}, nil
-	}
-
-	return dnsIPv4ResponseWriter{connection: ipv4.NewPacketConn(udpConnection)}, nil
+	return dnsIPv4ResponseWriter{connection: ipv4.NewPacketConn(connection)}
 }
 
 func listenTransparentUDPSocket(
