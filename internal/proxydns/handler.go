@@ -3,7 +3,9 @@ package proxydns
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"net/netip"
 	"time"
 
 	"github.com/erikgeiser/airjail/internal/policy"
@@ -37,61 +39,66 @@ func (server *Server) handle(ctx context.Context, wireRequest []byte) []byte {
 		return packResponse(query.request, dns.RcodeRefused)
 	}
 
+	addresses, snapshotted, err := server.policy.StaticAddresses(query.hostname)
+	if err != nil {
+		server.logger.Debugf("read DNS snapshot for %s: %v", query.hostname, err)
+
+		return packResponse(query.request, dns.RcodeServerFailure)
+	}
+
+	if snapshotted {
+		server.logger.Allowf(dns.TypeToString[query.queryType] + " " + query.hostname)
+
+		return packAddressResponse(query, addresses, uint32(minimumGrantTTL/time.Second))
+	}
+
+	if server.resolver == nil {
+		server.logger.Debugf("no upstream resolver is configured for %s", query.hostname)
+
+		return packResponse(query.request, dns.RcodeServerFailure)
+	}
+
 	if !server.acquireQuery(ctx) {
 		return packResponse(query.request, dns.RcodeServerFailure)
 	}
 	defer server.releaseQuery()
 
-	upstreamRequest := newUpstreamRequest(query)
+	network := "ip4"
+	if query.queryType == dns.TypeAAAA {
+		network = "ip6"
+	}
 
-	upstreamResponse, err := server.upstream.Exchange(ctx, upstreamRequest)
+	result, err := server.resolver.Resolve(ctx, network, query.hostname)
 	if err != nil {
 		server.logger.Debugf("resolve DNS question %s: %v", query.hostname, err)
 
-		return packResponse(query.request, dns.RcodeServerFailure)
-	}
-
-	err = validateUpstreamResponse(upstreamRequest, upstreamResponse)
-	if err != nil {
-		server.logger.Debugf("validate DNS response for %s: %v", query.hostname, err)
-
-		return packResponse(query.request, dns.RcodeServerFailure)
-	}
-
-	upstreamResponse.Id = query.request.Id
-	upstreamResponse.Question = query.request.Question
-
-	if upstreamResponse.Rcode != dns.RcodeSuccess {
-		server.logger.Allowf(dns.TypeToString[query.queryType] + " " + query.hostname)
-
-		return packMessage(upstreamResponse)
-	}
-
-	answer, err := parseAddressAnswer(upstreamResponse, query.hostname, query.queryType)
-	if err != nil {
-		server.logger.Debugf("parse DNS response for %s: %v", query.hostname, err)
-
-		return packResponse(query.request, dns.RcodeServerFailure)
-	}
-
-	if !answer.empty() {
-		allowed, err = server.policy.CommitResolution(authorization, answer.policyResult(now), now)
-		if err != nil {
-			server.logger.Debugf("record DNS response for %s: %v", query.hostname, err)
-
-			return packResponse(query.request, dns.RcodeServerFailure)
+		responseCodeErr := &responseCodeError{}
+		if errors.As(err, &responseCodeErr) {
+			return packResponse(query.request, responseCodeErr.code)
 		}
 
-		if !allowed {
-			server.logger.Blockf(dns.TypeToString[query.queryType] + " " + query.hostname)
+		return packResponse(query.request, dns.RcodeServerFailure)
+	}
 
-			return packResponse(query.request, dns.RcodeRefused)
-		}
+	_, err = server.policy.CommitResolution(authorization, result, now)
+	if err != nil {
+		server.logger.Debugf("record DNS response for %s: %v", query.hostname, err)
+
+		return packResponse(query.request, dns.RcodeServerFailure)
 	}
 
 	server.logger.Allowf(dns.TypeToString[query.queryType] + " " + query.hostname)
 
-	return packMessage(upstreamResponse)
+	ttlDuration := time.Until(result.ExpiresAt)
+	if ttlDuration < minimumGrantTTL {
+		ttlDuration = minimumGrantTTL
+	}
+
+	if ttlDuration > maximumGrantTTL {
+		ttlDuration = maximumGrantTTL
+	}
+
+	return packAddressResponse(query, result.Addresses, uint32(ttlDuration/time.Second))
 }
 
 func validateClientRequest(wireRequest []byte) (clientQuery, []byte) {
@@ -177,6 +184,30 @@ func validateUpstreamResponse(request, response *dns.Msg) error {
 	}
 
 	return nil
+}
+
+func packAddressResponse(query clientQuery, addresses []netip.Addr, ttl uint32) []byte {
+	response := new(dns.Msg)
+	response.SetReply(query.request)
+
+	for _, address := range addresses {
+		header := dns.RR_Header{
+			Name:  dns.Fqdn(query.hostname),
+			Class: dns.ClassINET,
+			Ttl:   ttl,
+		}
+
+		switch {
+		case query.queryType == dns.TypeA && address.Is4():
+			header.Rrtype = dns.TypeA
+			response.Answer = append(response.Answer, &dns.A{Hdr: header, A: address.AsSlice()})
+		case query.queryType == dns.TypeAAAA && address.Is6():
+			header.Rrtype = dns.TypeAAAA
+			response.Answer = append(response.Answer, &dns.AAAA{Hdr: header, AAAA: address.AsSlice()})
+		}
+	}
+
+	return packMessage(response)
 }
 
 func packMalformedResponse(request []byte, responseCode int) []byte {

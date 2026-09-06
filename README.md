@@ -65,10 +65,13 @@ Each rule can reference destinations in multiple ways:
 
 - **IP Address:** References a single IP, for example `--allow 10.0.0.1`.
 - **CIDR Network:** References an entire network, for example `--allow 10.0.0.1/8`
-- **Hostname:** Hostnames will be resolved and the rule will be applied for the
-  hostname itself as well as the IP addresses it resolves to. If the hostname
-  does not resolve, `airjail` will return an error, unless
-  `--allow-unresolved-rules` or `allow_unresolved_rules: true` is set.
+- **Hostname:** Exact hostnames are resolved once at startup. Complete chained
+  CNAME aliases and terminal addresses become an immutable snapshot for the
+  invocation. If the hostname does not resolve, `airjail` returns an error
+  unless `--allow-unresolved-rules` or `allow_unresolved_rules: true` is set.
+  A snapshot can instead be supplied directly, avoiding the lookup, for example
+  `--allow 'foo.bar@10.0.0.1@fe80::1'` or
+  `--allow 'foo.bar:443@10.0.0.1@fe80::1'`.
 - **Wildcard:** Hostnames can be specified with a wildcard `*`. This can be used
   to reference all subdomains (`--allow '*.example.com'`). In this case, it
   matches `sub.example.com`, but not `example.com`. Since wildcards cannot be
@@ -135,6 +138,7 @@ block:
   - "127.0.0.1:53"
 restrict_sockets: true
 allow_unresolved_rules: false
+allow_arbitrary_dns: false
 proxy: http://proxy.example:8080
 connect_timeout: 5s
 transparent_fallback: false
@@ -144,6 +148,15 @@ Transparent TCP and filtered DNS are enabled by default for non-empty policies.
 Use `--disable-transparent-fallback` or `transparent_fallback: false` for
 proxy-only operation. In that mode, applications that ignore the injected HTTP
 and SOCKS proxy settings have no network egress.
+
+By default, exact hostname rules and their CNAME aliases are answered from the
+startup snapshot without another upstream query. Only names matched by wildcard
+hostname allow rules, including authorized CNAME chains, may reach an upstream
+DNS resolver. IP/CIDR-only and block-only policies therefore do not resolve
+child-supplied hostnames. Use `--allow-arbitrary-dns` or `allow_arbitrary_dns:
+true` to permit arbitrary A/AAAA names to be resolved. Connection policy is
+still enforced on every answer, but query names can carry data to an
+authoritative DNS server.
 
 ## Building
 

@@ -17,18 +17,26 @@ type Resolver interface {
 	LookupNetIP(ctx context.Context, network string, host string) ([]netip.Addr, error)
 }
 
+// ChainResolver resolves complete, ordered CNAME chains and their terminal addresses.
+type ChainResolver interface {
+	Resolve(ctx context.Context, network string, hostname string) (ResolutionResult, error)
+}
+
 // Options controls policy construction and hostname-rule expansion.
 type Options struct {
-	Resolver        Resolver
-	AllowUnresolved bool
-	Logger          *logging.Logger
+	Resolver          Resolver
+	ChainResolver     ChainResolver
+	AllowUnresolved   bool
+	AllowArbitraryDNS bool
+	Logger            *logging.Logger
 }
 
 // Policy is an immutable, parsed egress policy.
 type Policy struct {
-	allow   ruleSet
-	block   ruleSet
-	dynamic dynamicPolicy
+	allow             ruleSet
+	block             ruleSet
+	allowArbitraryDNS bool
+	dynamic           dynamicPolicy
 }
 
 // New parses rules and resolves exact hostname rules.
@@ -50,19 +58,22 @@ func New(ctx context.Context, allowRules, blockRules []string, options Options) 
 
 	cache := make(map[string]lookupResult)
 
-	err = resolveHostRules(ctx, &allow, resolver, cache, options)
+	err = resolveHostRules(ctx, "allow", &allow, resolver, options.ChainResolver, cache, options)
 	if err != nil {
 		return nil, fmt.Errorf("expand allow policy: %w", err)
 	}
 
-	err = resolveHostRules(ctx, &block, resolver, cache, options)
+	err = resolveHostRules(ctx, "block", &block, resolver, options.ChainResolver, cache, options)
 	if err != nil {
 		return nil, fmt.Errorf("expand block policy: %w", err)
 	}
 
+	propagateCNAMEBlocks(allow.hosts, &block, options.Logger)
+
 	return &Policy{
-		allow: allow,
-		block: block,
+		allow:             allow,
+		block:             block,
+		allowArbitraryDNS: options.AllowArbitraryDNS,
 		dynamic: dynamicPolicy{
 			allow:   make(map[dynamicAddressKey]time.Time),
 			block:   make(map[dynamicAddressKey]time.Time),
@@ -72,14 +83,17 @@ func New(ctx context.Context, allowRules, blockRules []string, options Options) 
 }
 
 type lookupResult struct {
+	aliases   []string
 	addresses []netip.Addr
 	err       error
 }
 
 func resolveHostRules(
 	ctx context.Context,
+	kind string,
 	rules *ruleSet,
 	resolver Resolver,
+	chainResolver ChainResolver,
 	cache map[string]lookupResult,
 	options Options,
 ) error {
@@ -89,10 +103,33 @@ func resolveHostRules(
 			continue
 		}
 
+		if rule.configuredSnapshot {
+			for _, address := range rule.resolved {
+				options.Logger.Infof(
+					"using configured %s snapshot %s to %s",
+					kind,
+					formatHostRule(*rule),
+					formatAddressRule(address, rule.port),
+				)
+			}
+
+			continue
+		}
+
 		result, found := cache[rule.hostname]
 		if !found {
-			addresses, err := resolver.LookupNetIP(ctx, "ip", rule.hostname)
-			result = lookupResult{addresses: normalizeAddresses(addresses), err: err}
+			if chainResolver != nil {
+				resolution, err := chainResolver.Resolve(ctx, "ip", rule.hostname)
+				result = lookupResult{
+					aliases:   normalizeAliases(resolution.CNAMEChain),
+					addresses: normalizeAddresses(resolution.Addresses),
+					err:       err,
+				}
+			} else {
+				addresses, err := resolver.LookupNetIP(ctx, "ip", rule.hostname)
+				result = lookupResult{addresses: normalizeAddresses(addresses), err: err}
+			}
+
 			cache[rule.hostname] = result
 		}
 
@@ -116,10 +153,71 @@ func resolveHostRules(
 			continue
 		}
 
+		rule.aliases = slices.Clone(result.aliases)
 		rule.resolved = slices.Clone(result.addresses)
+
+		expansion := ""
+		if len(rule.aliases) != 0 {
+			expansion = " via " + strings.Join(rule.aliases, ", ")
+		}
+
+		for _, address := range rule.resolved {
+			options.Logger.Infof(
+				"expanded %s rule %s%s to %s",
+				kind,
+				formatHostRule(*rule),
+				expansion,
+				formatAddressRule(address, rule.port),
+			)
+		}
 	}
 
 	return nil
+}
+
+func propagateCNAMEBlocks(allowRules []hostRule, block *ruleSet, logger *logging.Logger) {
+	for _, allowRule := range allowRules {
+		if allowRule.wildcard || len(allowRule.aliases) == 0 {
+			continue
+		}
+
+		for _, alias := range allowRule.aliases {
+			for blockIndex := range block.hosts {
+				blockRule := &block.hosts[blockIndex]
+				if !blockRule.matchesHostname(alias) {
+					continue
+				}
+
+				for _, address := range allowRule.resolved {
+					if slices.Contains(blockRule.resolved, address) {
+						continue
+					}
+
+					blockRule.resolved = append(blockRule.resolved, address)
+					logger.Infof(
+						"expanded block rule %s through CNAME %s to %s",
+						formatHostRule(*blockRule),
+						alias,
+						formatAddressRule(address, blockRule.port),
+					)
+				}
+			}
+		}
+	}
+}
+
+func normalizeAliases(aliases []string) []string {
+	normalized := make([]string, 0, len(aliases))
+	for _, alias := range aliases {
+		hostname, err := NormalizeHostname(alias)
+		if err != nil || slices.Contains(normalized, hostname) {
+			continue
+		}
+
+		normalized = append(normalized, hostname)
+	}
+
+	return normalized
 }
 
 func normalizeAddresses(addresses []netip.Addr) []netip.Addr {
@@ -141,6 +239,33 @@ func normalizeAddresses(addresses []netip.Addr) []netip.Addr {
 	}
 
 	return normalized
+}
+
+// StaticAddresses returns invocation-snapshot addresses for an exact allowed hostname.
+func (policy *Policy) StaticAddresses(rawHostname string) ([]netip.Addr, bool, error) {
+	hostname, err := NormalizeHostname(rawHostname)
+	if err != nil {
+		return nil, false, fmt.Errorf("normalize snapshot hostname: %w", err)
+	}
+
+	addresses := []netip.Addr{}
+	found := false
+
+	for _, rule := range policy.allow.hosts {
+		if rule.wildcard || !rule.matchesHostname(hostname) {
+			continue
+		}
+
+		found = true
+
+		for _, address := range rule.resolved {
+			if !slices.Contains(addresses, address) {
+				addresses = append(addresses, address)
+			}
+		}
+	}
+
+	return addresses, found, nil
 }
 
 // Empty reports whether the policy has no allow or block rules.
@@ -189,6 +314,26 @@ func (rules *ruleSet) empty() bool {
 	return len(rules.hosts) == 0 && len(rules.addresses) == 0 && len(rules.prefixes) == 0
 }
 
+func (rules *ruleSet) matchesHostnameOnAnyPort(hostname string) bool {
+	for _, rule := range rules.hosts {
+		if rule.matchesHostname(hostname) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (rules *ruleSet) matchesHostnameOnAllPorts(hostname string) bool {
+	for _, rule := range rules.hosts {
+		if !rule.port.set && rule.matchesHostname(hostname) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (rules *ruleSet) matches(hostname string, address netip.Addr, port uint16) bool {
 	for _, rule := range rules.hosts {
 		if !rule.port.matches(port) {
@@ -223,7 +368,7 @@ func (rules *ruleSet) matches(hostname string, address netip.Addr, port uint16) 
 
 func (rule hostRule) matchesHostname(hostname string) bool {
 	if !rule.wildcard {
-		return hostname == rule.hostname
+		return hostname == rule.hostname || slices.Contains(rule.aliases, hostname)
 	}
 
 	return len(hostname) > len(rule.hostname) && strings.HasSuffix(hostname, "."+rule.hostname)

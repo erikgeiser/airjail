@@ -62,6 +62,7 @@ type flagValues struct {
 	proxy                      string
 	connectTimeout             time.Duration
 	allowUnresolved            bool
+	allowArbitraryDNS          bool
 	disableTransparentFallback bool
 	restrictUnixSockets        bool
 	keepUnsafeCapabilities     []string
@@ -82,6 +83,8 @@ func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
 		"Maximum outbound connection establishment `duration`")
 	flags.BoolVar(&values.allowUnresolved, "allow-unresolved-rules", false,
 		"Do not fail when destination hostname does not resolve")
+	flags.BoolVar(&values.allowArbitraryDNS, "allow-arbitrary-dns", false,
+		"Allow arbitrary child-controlled names to reach upstream DNS resolvers")
 	flags.BoolVar(&values.disableTransparentFallback, "disable-transparent-fallback", false,
 		"Disable transparent TCP and DNS interception")
 	flags.BoolVar(&values.restrictUnixSockets, "restrict-sockets", false,
@@ -235,6 +238,10 @@ func Parse(args []string) (Invocation, error) {
 
 	if flags.Changed("allow-unresolved-rules") {
 		effective.AllowUnresolvedRules = values.allowUnresolved
+	}
+
+	if flags.Changed("allow-arbitrary-dns") {
+		effective.AllowArbitraryDNS = values.allowArbitraryDNS
 	}
 
 	if flags.Changed("disable-transparent-fallback") {

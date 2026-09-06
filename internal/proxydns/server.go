@@ -24,7 +24,7 @@ const (
 // Server forwards filtered DNS queries and records approved answers in policy.
 type Server struct {
 	policy   *policy.Policy
-	upstream Upstream
+	resolver *Resolver
 	logger   *logging.Logger
 	queries  chan struct{}
 
@@ -33,17 +33,23 @@ type Server struct {
 
 // New creates a DNS server.
 func New(networkPolicy *policy.Policy, upstream Upstream, logger *logging.Logger) (*Server, error) {
+	resolver, err := NewResolver(upstream)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewWithResolver(networkPolicy, resolver, logger)
+}
+
+// NewWithResolver creates a DNS server using the invocation's shared resolver.
+func NewWithResolver(networkPolicy *policy.Policy, resolver *Resolver, logger *logging.Logger) (*Server, error) {
 	if networkPolicy == nil {
 		return nil, fmt.Errorf("create DNS server: network policy is nil")
 	}
 
-	if upstream == nil {
-		return nil, fmt.Errorf("create DNS server: upstream resolver is nil")
-	}
-
 	return &Server{
 		policy:      networkPolicy,
-		upstream:    upstream,
+		resolver:    resolver,
 		logger:      logger,
 		queries:     make(chan struct{}, maxConcurrentQueries),
 		connections: stream.NewConnGroup(),

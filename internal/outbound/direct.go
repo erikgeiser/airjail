@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"time"
 
 	"github.com/erikgeiser/airjail/internal/logging"
 	"github.com/erikgeiser/airjail/internal/policy"
@@ -84,9 +85,22 @@ func (direct *Direct) Dial(ctx context.Context, destination policy.Destination, 
 		return direct.dialLiteral(ctx, destination.RoutingAddress(), port)
 	}
 
-	addresses, err := direct.resolver.LookupNetIP(ctx, "ip", destination.Hostname())
+	now := time.Now()
+
+	authorization, mayResolve, err := direct.policy.BeginResolution(destination.Hostname(), now)
 	if err != nil {
-		return nil, fmt.Errorf("resolve destination %q: %w", destination.Hostname(), err)
+		return nil, fmt.Errorf("authorize destination resolution: %w", err)
+	}
+
+	if !mayResolve {
+		direct.logger.Blockf("DNS resolution for %s", destination.Hostname())
+
+		return nil, fmt.Errorf("%w: DNS resolution for %s", ErrDenied, destination.Hostname())
+	}
+
+	addresses, err := direct.resolveHostname(ctx, destination.Hostname(), authorization, now)
+	if err != nil {
+		return nil, err
 	}
 
 	var lastDialError error
@@ -128,6 +142,44 @@ func (direct *Direct) Dial(ctx context.Context, destination policy.Destination, 
 	}
 
 	return nil, fmt.Errorf("%w: %s:%d", ErrDenied, destination.Hostname(), port)
+}
+
+func (direct *Direct) resolveHostname(
+	ctx context.Context,
+	hostname string,
+	authorization policy.ResolutionAuthorization,
+	now time.Time,
+) ([]netip.Addr, error) {
+	addresses, snapshotted, err := direct.policy.StaticAddresses(hostname)
+	if err != nil {
+		return nil, fmt.Errorf("read destination snapshot: %w", err)
+	}
+
+	if snapshotted {
+		return addresses, nil
+	}
+
+	chainResolver, ok := direct.resolver.(policy.ChainResolver)
+	if !ok {
+		addresses, err = direct.resolver.LookupNetIP(ctx, "ip", hostname)
+		if err != nil {
+			return nil, fmt.Errorf("resolve destination %q: %w", hostname, err)
+		}
+
+		return addresses, nil
+	}
+
+	resolution, err := chainResolver.Resolve(ctx, "ip", hostname)
+	if err != nil {
+		return nil, fmt.Errorf("resolve destination %q: %w", hostname, err)
+	}
+
+	_, err = direct.policy.CommitResolution(authorization, resolution, now)
+	if err != nil {
+		return nil, fmt.Errorf("record destination resolution: %w", err)
+	}
+
+	return resolution.Addresses, nil
 }
 
 func (direct *Direct) dialLiteral(ctx context.Context, address netip.Addr, port uint16) (net.Conn, error) {

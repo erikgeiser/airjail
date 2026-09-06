@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/erikgeiser/airjail/internal/logging"
@@ -268,6 +269,124 @@ func TestUnresolvedHostnamePolicy(t *testing.T) {
 
 	if !allowed {
 		t.Fatal("unresolved hostname-only rule did not match")
+	}
+}
+
+type chainResolverFunc func(context.Context, string, string) (ResolutionResult, error)
+
+func (resolver chainResolverFunc) Resolve(
+	ctx context.Context,
+	network string,
+	hostname string,
+) (ResolutionResult, error) {
+	return resolver(ctx, network, hostname)
+}
+
+func TestStartupExpansionPreservesCompleteCNAMEChain(t *testing.T) {
+	t.Parallel()
+
+	resolver := chainResolverFunc(func(_ context.Context, network, hostname string) (ResolutionResult, error) {
+		if network != "ip" || hostname != "example.com" {
+			return ResolutionResult{}, fmt.Errorf("unexpected resolution %s %s", network, hostname)
+		}
+
+		return ResolutionResult{
+			CNAMEChain: []string{"edge.cdn.test", "region.cdn.test"},
+			Addresses:  []netip.Addr{netip.MustParseAddr("192.0.2.10")},
+		}, nil
+	})
+
+	networkPolicy, err := New(context.Background(), []string{"example.com:443"}, nil, Options{
+		ChainResolver: resolver,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for _, hostname := range []string{"example.com", "edge.cdn.test", "region.cdn.test"} {
+		allowed, allowErr := networkPolicy.Allows(hostname, netip.MustParseAddr("192.0.2.10"), 443)
+		if allowErr != nil {
+			t.Fatalf("Allows(%s): %v", hostname, allowErr)
+		}
+
+		if !allowed {
+			t.Errorf("CNAME chain hostname %s was not allowed", hostname)
+		}
+	}
+
+	allowed, err := networkPolicy.Allows("region.cdn.test", netip.MustParseAddr("192.0.2.10"), 80)
+	if err != nil {
+		t.Fatalf("Allows(other port): %v", err)
+	}
+
+	if allowed {
+		t.Fatal("CNAME expansion lost its source port restriction")
+	}
+}
+
+func TestStartupCNAMEBlockVetoesOriginalHostnameConnection(t *testing.T) {
+	t.Parallel()
+
+	resolver := chainResolverFunc(func(_ context.Context, _ string, hostname string) (ResolutionResult, error) {
+		switch hostname {
+		case "example.com":
+			return ResolutionResult{
+				CNAMEChain: []string{"blocked.cdn.test"},
+				Addresses:  []netip.Addr{netip.MustParseAddr("192.0.2.10")},
+			}, nil
+		default:
+			return ResolutionResult{}, fmt.Errorf("unexpected resolution for %s", hostname)
+		}
+	})
+
+	networkPolicy, err := New(
+		context.Background(),
+		[]string{"example.com"},
+		[]string{"*.cdn.test"},
+		Options{ChainResolver: resolver},
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	allowed, err := networkPolicy.Allows("example.com", netip.MustParseAddr("192.0.2.10"), 443)
+	if err != nil {
+		t.Fatalf("Allows: %v", err)
+	}
+
+	if allowed {
+		t.Fatal("CNAME hostname block did not veto the original hostname connection")
+	}
+}
+
+func TestHostnameExpansionIsLoggedAtInfoLevel(t *testing.T) {
+	t.Parallel()
+
+	resolver := &fakeResolver{
+		addresses: map[string][]netip.Addr{
+			"service.example": {netip.MustParseAddr("192.0.2.10")},
+		},
+		errors: map[string]error{},
+	}
+
+	var output bytes.Buffer
+
+	logger, err := logging.New(&output, "info", "")
+	if err != nil {
+		t.Fatalf("logging.New: %v", err)
+	}
+
+	_, err = New(context.Background(), []string{"service.example:443"}, nil, Options{
+		Resolver: resolver,
+		Logger:   logger,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	want := "expanded allow rule service.example:443 to 192.0.2.10:443"
+	if !strings.Contains(output.String(), want) {
+		t.Errorf("log output = %q, want it to contain %q", output.String(), want)
 	}
 }
 

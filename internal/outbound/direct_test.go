@@ -172,6 +172,62 @@ func TestDirectChecksScopedIPv6WithoutZoneAndRoutesWithZone(t *testing.T) {
 	}
 }
 
+type resolutionTrackingResolver struct {
+	lookups []string
+}
+
+func (resolver *resolutionTrackingResolver) LookupNetIP(
+	_ context.Context,
+	network string,
+	host string,
+) ([]netip.Addr, error) {
+	if network != "ip" {
+		return nil, fmt.Errorf("unexpected network %q", network)
+	}
+
+	resolver.lookups = append(resolver.lookups, host)
+
+	return nil, nil
+}
+
+func TestDirectRejectsHostnameBeforeResolution(t *testing.T) {
+	t.Parallel()
+
+	resolver := &resolutionTrackingResolver{}
+
+	networkPolicy, err := policy.New(
+		context.Background(),
+		[]string{"allowed.example"},
+		nil,
+		policy.Options{Resolver: resolver, AllowUnresolved: true},
+	)
+	if err != nil {
+		t.Fatalf("policy.New: %v", err)
+	}
+
+	resolver.lookups = nil
+
+	destination, err := policy.ParseDestination("data.c2.example")
+	if err != nil {
+		t.Fatalf("policy.ParseDestination: %v", err)
+	}
+
+	connection, err := NewDirect(networkPolicy, resolver, nil, nil).Dial(t.Context(), destination, 443)
+	if connection != nil {
+		_ = connection.Close()
+
+		t.Fatal("Dial returned a connection for denied hostname")
+	}
+
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("Dial error = %v, want ErrDenied", err)
+	}
+
+	if len(resolver.lookups) != 0 {
+		t.Fatalf("denied hostname reached resolver: %v", resolver.lookups)
+	}
+}
+
 func TestDirectDoesNotDialDeniedAddress(t *testing.T) {
 	t.Parallel()
 

@@ -79,15 +79,50 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 		logger.Infof("using permission-preserving network namespace")
 	}
 
-	networkPolicy, err := policy.New(ctx, invocation.Config.Allow, invocation.Config.Block, policy.Options{
-		AllowUnresolved: invocation.Config.AllowUnresolvedRules,
-		Logger:          logger,
-	})
+	requiresResolver, err := policy.RulesRequireResolver(
+		invocation.Config.Allow,
+		invocation.Config.Block,
+		invocation.Config.AllowArbitraryDNS,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	var dnsResolver *proxydns.Resolver
+
+	if requiresResolver {
+		dnsUpstream, upstreamErr := proxydns.NewSystemUpstream("/etc/resolv.conf")
+		if upstreamErr != nil {
+			return 0, upstreamErr
+		}
+
+		dnsResolver, err = proxydns.NewResolver(dnsUpstream)
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	policyOptions := policy.Options{
+		AllowUnresolved:   invocation.Config.AllowUnresolvedRules,
+		AllowArbitraryDNS: invocation.Config.AllowArbitraryDNS,
+		Logger:            logger,
+	}
+	if dnsResolver != nil {
+		policyOptions.Resolver = dnsResolver
+		policyOptions.ChainResolver = dnsResolver
+	}
+
+	networkPolicy, err := policy.New(ctx, invocation.Config.Allow, invocation.Config.Block, policyOptions)
 	if err != nil {
 		return 0, err
 	}
 
 	environment := childEnvironment(os.Environ(), !networkPolicy.Empty())
+
+	if invocation.Config.AllowArbitraryDNS {
+		logger.Infof("arbitrary DNS resolution enabled")
+	}
+
 	if networkPolicy.Empty() {
 		logger.Infof("empty policy: starting child in loopback-only namespace without proxies")
 
@@ -110,6 +145,7 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 		environment,
 		invocation.Command,
 		networkPolicy,
+		dnsResolver,
 		namespaceMode,
 		invocation.Config.RestrictUnixSockets,
 		invocation.Config.KeepUnsafeCapabilities,
@@ -127,6 +163,7 @@ func runWithProxies(
 	environment []string,
 	command []string,
 	networkPolicy *policy.Policy,
+	dnsResolver *proxydns.Resolver,
 	namespaceMode namespace.Mode,
 	restrictUnixSockets bool,
 	keepUnsafeCapabilities []string,
@@ -214,7 +251,7 @@ func runWithProxies(
 		return 0, err
 	}
 
-	connector := outbound.NewRouted(networkPolicy, nil, router.Dial, logger)
+	connector := outbound.NewRouted(networkPolicy, dnsResolver, router.Dial, logger)
 	httpServer := proxyhttp.New(connector.WithLoggerPrefix("HTTP proxy"))
 
 	socksServer, err := proxysocks.New(connector.WithLoggerPrefix("SOCKS proxy"), connectTimeout)
@@ -225,12 +262,7 @@ func runWithProxies(
 	var dnsServer *proxydns.Server
 
 	if transparentFallback {
-		dnsUpstream, upstreamErr := proxydns.NewSystemUpstream("/etc/resolv.conf")
-		if upstreamErr != nil {
-			return 0, upstreamErr
-		}
-
-		dnsServer, err = proxydns.New(networkPolicy, dnsUpstream, logger.WithPrefix("DNS proxy"))
+		dnsServer, err = proxydns.NewWithResolver(networkPolicy, dnsResolver, logger.WithPrefix("DNS proxy"))
 		if err != nil {
 			return 0, err
 		}

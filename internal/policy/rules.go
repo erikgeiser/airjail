@@ -3,6 +3,7 @@ package policy
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -21,11 +22,34 @@ func (m portMatcher) matches(port uint16) bool {
 	return !m.set || m.port == port
 }
 
+func formatHostRule(rule hostRule) string {
+	hostname := rule.hostname
+	if rule.wildcard {
+		hostname = "*." + hostname
+	}
+
+	if !rule.port.set {
+		return hostname
+	}
+
+	return net.JoinHostPort(hostname, strconv.Itoa(int(rule.port.port)))
+}
+
+func formatAddressRule(address netip.Addr, port portMatcher) string {
+	if !port.set {
+		return address.String()
+	}
+
+	return net.JoinHostPort(address.String(), strconv.Itoa(int(port.port)))
+}
+
 type hostRule struct {
-	hostname string
-	wildcard bool
-	port     portMatcher
-	resolved []netip.Addr
+	hostname           string
+	aliases            []string
+	wildcard           bool
+	port               portMatcher
+	resolved           []netip.Addr
+	configuredSnapshot bool
 }
 
 type addressRule struct {
@@ -42,6 +66,37 @@ type ruleSet struct {
 	hosts     []hostRule
 	addresses []addressRule
 	prefixes  []prefixRule
+}
+
+// RulesRequireResolver reports whether startup or authorized runtime behavior needs DNS.
+func RulesRequireResolver(allowRules, blockRules []string, allowArbitraryDNS bool) (bool, error) {
+	allow, err := parseRules(allowRules, nil)
+	if err != nil {
+		return false, fmt.Errorf("parse allow policy: %w", err)
+	}
+
+	block, err := parseRules(blockRules, nil)
+	if err != nil {
+		return false, fmt.Errorf("parse block policy: %w", err)
+	}
+
+	if allowArbitraryDNS && (!allow.empty() || !block.empty()) {
+		return true, nil
+	}
+
+	for _, rule := range allow.hosts {
+		if rule.wildcard || !rule.configuredSnapshot {
+			return true, nil
+		}
+	}
+
+	for _, rule := range block.hosts {
+		if !rule.wildcard && !rule.configuredSnapshot {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func parseRules(rawRules []string, logger *logging.Logger) (ruleSet, error) {
@@ -62,13 +117,22 @@ func parseRules(rawRules []string, logger *logging.Logger) (ruleSet, error) {
 }
 
 func (rules *ruleSet) add(rawRule string, logger *logging.Logger) error {
-	host, port, bracketed, err := splitRulePort(rawRule)
+	baseRule, snapshotAddresses, err := splitConfiguredSnapshot(rawRule)
+	if err != nil {
+		return err
+	}
+
+	host, port, bracketed, err := splitRulePort(baseRule)
 	if err != nil {
 		return err
 	}
 
 	prefix, prefixErr := netip.ParsePrefix(host)
 	if prefixErr == nil {
+		if len(snapshotAddresses) != 0 {
+			return fmt.Errorf("configured snapshots require an exact hostname")
+		}
+
 		maskedPrefix := prefix.Masked()
 		if prefix != maskedPrefix {
 			logger.Debugf("normalized CIDR %q to %q", prefix, maskedPrefix)
@@ -84,6 +148,10 @@ func (rules *ruleSet) add(rawRule string, logger *logging.Logger) error {
 
 	address, addressErr := netip.ParseAddr(host)
 	if addressErr == nil {
+		if len(snapshotAddresses) != 0 {
+			return fmt.Errorf("configured snapshots require an exact hostname")
+		}
+
 		if address.Zone() != "" {
 			return fmt.Errorf("IP address has a zone identifier")
 		}
@@ -114,14 +182,51 @@ func (rules *ruleSet) add(rawRule string, logger *logging.Logger) error {
 		return err
 	}
 
+	if wildcard && len(snapshotAddresses) != 0 {
+		return fmt.Errorf("configured snapshots require an exact hostname")
+	}
+
 	rules.hosts = append(rules.hosts, hostRule{
-		hostname: hostname,
-		wildcard: wildcard,
-		port:     port,
-		resolved: []netip.Addr{},
+		hostname:           hostname,
+		aliases:            []string{},
+		wildcard:           wildcard,
+		port:               port,
+		resolved:           snapshotAddresses,
+		configuredSnapshot: len(snapshotAddresses) != 0,
 	})
 
 	return nil
+}
+
+func splitConfiguredSnapshot(rawRule string) (string, []netip.Addr, error) {
+	parts := strings.Split(rawRule, "@")
+	if len(parts) == 1 {
+		return rawRule, nil, nil
+	}
+
+	if parts[0] == "" {
+		return "", nil, fmt.Errorf("snapshot hostname is empty")
+	}
+
+	addresses := make([]netip.Addr, 0, len(parts)-1)
+	seen := make(map[netip.Addr]struct{}, len(parts)-1)
+
+	for _, rawAddress := range parts[1:] {
+		address, err := netip.ParseAddr(rawAddress)
+		if err != nil || address.Zone() != "" {
+			return "", nil, fmt.Errorf("snapshot address %q is not a strict unscoped IP literal", rawAddress)
+		}
+
+		address = address.Unmap()
+		if _, found := seen[address]; found {
+			continue
+		}
+
+		seen[address] = struct{}{}
+		addresses = append(addresses, address)
+	}
+
+	return parts[0], addresses, nil
 }
 
 func splitRulePort(rawRule string) (host string, port portMatcher, bracketed bool, err error) {

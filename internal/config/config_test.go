@@ -20,6 +20,7 @@ proxy: http://proxy.example:8080
 connect_timeout: 3s
 transparent_fallback: false
 allow_unresolved_rules: true
+allow_arbitrary_dns: true
 restrict_sockets: true
 keep_unsafe_capabilities: [CAP_SYS_ADMIN]
 `)
@@ -55,6 +56,10 @@ keep_unsafe_capabilities: [CAP_SYS_ADMIN]
 
 	if !loaded.AllowUnresolvedRules {
 		t.Error("AllowUnresolvedRules = false, want true")
+	}
+
+	if !loaded.AllowArbitraryDNS {
+		t.Error("AllowArbitraryDNS = false, want true")
 	}
 
 	if !loaded.RestrictUnixSockets {

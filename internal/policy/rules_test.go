@@ -4,6 +4,7 @@ package policy
 import (
 	"bytes"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/erikgeiser/airjail/internal/logging"
@@ -95,6 +96,87 @@ func TestParseRulesClassifiesStrictly(t *testing.T) {
 				}
 
 				checkPort(t, rule.port, test.port, test.portSpecified)
+			}
+		})
+	}
+}
+
+func TestRulesRequireResolver(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		allow             []string
+		block             []string
+		allowArbitraryDNS bool
+		want              bool
+	}{
+		{name: "empty"},
+		{name: "address only", allow: []string{"10.0.0.0/8"}},
+		{name: "configured snapshot", allow: []string{"foo.bar@10.0.0.1"}},
+		{name: "exact hostname", allow: []string{"foo.bar"}, want: true},
+		{name: "allow wildcard", allow: []string{"*.foo.bar"}, want: true},
+		{name: "block wildcard only", block: []string{"*.foo.bar"}},
+		{name: "arbitrary DNS", block: []string{"10.0.0.1"}, allowArbitraryDNS: true, want: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := RulesRequireResolver(test.allow, test.block, test.allowArbitraryDNS)
+			if err != nil {
+				t.Fatalf("RulesRequireResolver: %v", err)
+			}
+
+			if got != test.want {
+				t.Errorf("RulesRequireResolver() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestParseConfiguredHostnameSnapshot(t *testing.T) {
+	t.Parallel()
+
+	rules, err := parseRules([]string{"foo.bar:443@10.0.0.1@fe80::1@10.0.0.1"}, nil)
+	if err != nil {
+		t.Fatalf("parseRules: %v", err)
+	}
+
+	if len(rules.hosts) != 1 {
+		t.Fatalf("host rule count = %d, want 1", len(rules.hosts))
+	}
+
+	rule := rules.hosts[0]
+	if rule.hostname != "foo.bar" || !rule.configuredSnapshot {
+		t.Errorf("host rule = %#v", rule)
+	}
+
+	wantAddresses := []netip.Addr{netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("fe80::1")}
+	if !slices.Equal(rule.resolved, wantAddresses) {
+		t.Errorf("snapshot addresses = %v, want %v", rule.resolved, wantAddresses)
+	}
+
+	checkPort(t, rule.port, 443, true)
+}
+
+func TestParseConfiguredHostnameSnapshotRejectsInvalidForms(t *testing.T) {
+	t.Parallel()
+
+	for _, rawRule := range []string{
+		"foo.bar@",
+		"foo.bar@other.example",
+		"*.foo.bar@10.0.0.1",
+		"10.0.0.1@192.0.2.1",
+		"foo.bar@fe80::1%eth0",
+	} {
+		t.Run(rawRule, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := parseRules([]string{rawRule}, nil)
+			if err == nil {
+				t.Fatalf("parseRules(%q) unexpectedly succeeded", rawRule)
 			}
 		})
 	}

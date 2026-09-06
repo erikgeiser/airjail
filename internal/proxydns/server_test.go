@@ -23,6 +23,34 @@ func (upstream upstreamFunc) Exchange(ctx context.Context, request *dns.Msg) (*d
 	return upstream(ctx, request)
 }
 
+func TestDNSConfiguredSnapshotDoesNotReachUpstream(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	server, _ := newTestServer(t, []string{"foo.bar@10.0.0.1@2001:db8::1"}, nil, func(request *dns.Msg) *dns.Msg {
+		called = true
+
+		response := new(dns.Msg)
+		response.SetReply(request)
+
+		return response
+	})
+
+	response := exchangeTestQuery(t, server, "foo.bar.", dns.TypeA)
+	if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
+		t.Fatalf("A response = %s with %d answers", dns.RcodeToString[response.Rcode], len(response.Answer))
+	}
+
+	response = exchangeTestQuery(t, server, "foo.bar.", dns.TypeAAAA)
+	if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
+		t.Fatalf("AAAA response = %s with %d answers", dns.RcodeToString[response.Rcode], len(response.Answer))
+	}
+
+	if called {
+		t.Fatal("configured snapshot reached upstream resolver")
+	}
+}
+
 func TestDNSAnswerInstallsTransparentAddressGrant(t *testing.T) {
 	t.Parallel()
 
@@ -52,30 +80,44 @@ func TestDNSAnswerInstallsTransparentAddressGrant(t *testing.T) {
 	}
 }
 
-func TestDNSAnswerBlockedByAddressIsRefused(t *testing.T) {
+func TestDNSAnswerBlockIsEnforcedAtConnectionTime(t *testing.T) {
 	t.Parallel()
 
-	server, _ := newTestServer(t, []string{"example.com"}, []string{"192.0.2.10"}, func(request *dns.Msg) *dns.Msg {
-		response := new(dns.Msg)
-		response.SetReply(request)
-		response.Answer = []dns.RR{&dns.A{
-			Hdr: dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   []byte{192, 0, 2, 10},
-		}}
+	server, networkPolicy := newTestServer(
+		t,
+		[]string{"*.example.com"},
+		[]string{"192.0.2.10"},
+		func(request *dns.Msg) *dns.Msg {
+			response := new(dns.Msg)
+			response.SetReply(request)
+			response.Answer = []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+				A:   []byte{192, 0, 2, 10},
+			}}
 
-		return response
-	})
+			return response
+		},
+	)
 
-	response := exchangeTestQuery(t, server, "example.com.", dns.TypeA)
-	if response.Rcode != dns.RcodeRefused {
-		t.Fatalf("response code = %s, want REFUSED", dns.RcodeToString[response.Rcode])
+	response := exchangeTestQuery(t, server, "service.example.com.", dns.TypeA)
+	if response.Rcode != dns.RcodeSuccess {
+		t.Fatalf("response code = %s, want NOERROR", dns.RcodeToString[response.Rcode])
+	}
+
+	allowed, err := networkPolicy.Allows("", netip.MustParseAddr("192.0.2.10"), 443)
+	if err != nil {
+		t.Fatalf("Allows: %v", err)
+	}
+
+	if allowed {
+		t.Fatal("blocked DNS address was allowed for connection")
 	}
 }
 
-func TestDNSMixedAddressAnswerIsRefused(t *testing.T) {
+func TestDNSMixedAddressAnswerIsReturnedWithoutBypassingBlocks(t *testing.T) {
 	t.Parallel()
 
-	server, _ := newTestServer(t, []string{"example.com"}, []string{"192.0.2.10"}, func(request *dns.Msg) *dns.Msg {
+	server, _ := newTestServer(t, []string{"*.example.com"}, []string{"192.0.2.10"}, func(request *dns.Msg) *dns.Msg {
 		response := new(dns.Msg)
 		response.SetReply(request)
 		response.Answer = []dns.RR{
@@ -92,13 +134,17 @@ func TestDNSMixedAddressAnswerIsRefused(t *testing.T) {
 		return response
 	})
 
-	response := exchangeTestQuery(t, server, "example.com.", dns.TypeA)
-	if response.Rcode != dns.RcodeRefused {
-		t.Fatalf("response code = %s, want REFUSED", dns.RcodeToString[response.Rcode])
+	response := exchangeTestQuery(t, server, "service.example.com.", dns.TypeA)
+	if response.Rcode != dns.RcodeSuccess {
+		t.Fatalf("response code = %s, want NOERROR", dns.RcodeToString[response.Rcode])
+	}
+
+	if len(response.Answer) != 2 {
+		t.Errorf("answer count = %d, want 2", len(response.Answer))
 	}
 }
 
-func TestDNSCIDRPolicyProvisionallyResolvesUnknownHostname(t *testing.T) {
+func TestDNSCIDRPolicyResolvesUnknownHostnameWhenArbitraryDNSIsEnabled(t *testing.T) {
 	t.Parallel()
 
 	server, _ := newTestServer(t, []string{"10.0.0.0/8"}, nil, func(request *dns.Msg) *dns.Msg {
@@ -110,7 +156,7 @@ func TestDNSCIDRPolicyProvisionallyResolvesUnknownHostname(t *testing.T) {
 		}}
 
 		return response
-	})
+	}, policy.Options{AllowArbitraryDNS: true})
 
 	response := exchangeTestQuery(t, server, "unknown.internal.", dns.TypeA)
 	if response.Rcode != dns.RcodeSuccess {
@@ -118,29 +164,105 @@ func TestDNSCIDRPolicyProvisionallyResolvesUnknownHostname(t *testing.T) {
 	}
 }
 
-func TestDNSCNAMEBlockVetoesAllowedOriginalName(t *testing.T) {
+func TestDNSCNAMEBlockVetoesConnection(t *testing.T) {
 	t.Parallel()
 
-	server, _ := newTestServer(t, []string{"example.com"}, []string{"blocked.cdn.test"}, func(request *dns.Msg) *dns.Msg {
+	server, networkPolicy := newTestServer(
+		t,
+		[]string{"*.example.com"},
+		[]string{"blocked.cdn.test"},
+		func(request *dns.Msg) *dns.Msg {
+			response := new(dns.Msg)
+			response.SetReply(request)
+			response.Answer = []dns.RR{
+				&dns.CNAME{
+					Hdr:    dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
+					Target: "blocked.cdn.test.",
+				},
+				&dns.A{
+					Hdr: dns.RR_Header{Name: "blocked.cdn.test.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+					A:   []byte{192, 0, 2, 10},
+				},
+			}
+
+			return response
+		},
+	)
+
+	response := exchangeTestQuery(t, server, "service.example.com.", dns.TypeA)
+	if response.Rcode != dns.RcodeSuccess {
+		t.Fatalf("response code = %s, want NOERROR", dns.RcodeToString[response.Rcode])
+	}
+
+	allowed, err := networkPolicy.Allows("", netip.MustParseAddr("192.0.2.10"), 443)
+	if err != nil {
+		t.Fatalf("Allows: %v", err)
+	}
+
+	if allowed {
+		t.Fatal("address learned through blocked CNAME was allowed")
+	}
+}
+
+func TestDNSChainedCNAMEsAuthorizeTerminalAddress(t *testing.T) {
+	t.Parallel()
+
+	server, networkPolicy := newTestServer(t, []string{"*.example.com"}, nil, func(request *dns.Msg) *dns.Msg {
 		response := new(dns.Msg)
 		response.SetReply(request)
 		response.Answer = []dns.RR{
 			&dns.CNAME{
 				Hdr:    dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
-				Target: "blocked.cdn.test.",
+				Target: "edge.cdn.test.",
+			},
+			&dns.CNAME{
+				Hdr:    dns.RR_Header{Name: "edge.cdn.test.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 30},
+				Target: "region.cdn.test.",
 			},
 			&dns.A{
-				Hdr: dns.RR_Header{Name: "blocked.cdn.test.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-				A:   []byte{192, 0, 2, 10},
+				Hdr: dns.RR_Header{Name: "region.cdn.test.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 20},
+				A:   []byte{192, 0, 2, 40},
 			},
 		}
 
 		return response
 	})
 
-	response := exchangeTestQuery(t, server, "example.com.", dns.TypeA)
+	response := exchangeTestQuery(t, server, "service.example.com.", dns.TypeA)
+	if response.Rcode != dns.RcodeSuccess {
+		t.Fatalf("response code = %s, want NOERROR", dns.RcodeToString[response.Rcode])
+	}
+
+	allowed, err := networkPolicy.Allows("", netip.MustParseAddr("192.0.2.40"), 443)
+	if err != nil {
+		t.Fatalf("Allows: %v", err)
+	}
+
+	if !allowed {
+		t.Fatal("terminal address from chained CNAMEs was not authorized")
+	}
+}
+
+func TestDNSBlockOnlyPolicyRejectsQueryBeforeUpstream(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	server, _ := newTestServer(t, nil, []string{"blocked.example"}, func(request *dns.Msg) *dns.Msg {
+		called = true
+
+		response := new(dns.Msg)
+		response.SetReply(request)
+
+		return response
+	})
+
+	response := exchangeTestQuery(t, server, "data.c2.example.", dns.TypeA)
 	if response.Rcode != dns.RcodeRefused {
 		t.Fatalf("response code = %s, want REFUSED", dns.RcodeToString[response.Rcode])
+	}
+
+	if called {
+		t.Fatal("block-only query reached upstream resolver")
 	}
 }
 
@@ -172,6 +294,7 @@ func newTestServer(
 	allowRules []string,
 	blockRules []string,
 	respond func(*dns.Msg) *dns.Msg,
+	additionalOptions ...policy.Options,
 ) (*Server, *policy.Policy) {
 	t.Helper()
 
@@ -179,10 +302,12 @@ func newTestServer(
 		return nil, nil
 	})
 
-	networkPolicy, err := policy.New(t.Context(), allowRules, blockRules, policy.Options{
-		Resolver:        resolver,
-		AllowUnresolved: true,
-	})
+	options := policy.Options{Resolver: resolver, AllowUnresolved: true}
+	if len(additionalOptions) > 0 {
+		options.AllowArbitraryDNS = additionalOptions[0].AllowArbitraryDNS
+	}
+
+	networkPolicy, err := policy.New(t.Context(), allowRules, blockRules, options)
 	if err != nil {
 		t.Fatalf("policy.New: %v", err)
 	}

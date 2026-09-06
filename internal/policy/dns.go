@@ -33,15 +33,7 @@ func (policy *Policy) BeginResolution(rawHostname string, now time.Time) (Resolu
 	policy.dynamic.removeExpired(now)
 
 	origins := policy.resolutionOriginsLocked(hostname)
-	for _, origin := range origins {
-		if policy.hostnameMayResolveLocked(origin) {
-			return ResolutionAuthorization{query: hostname, origins: origins}, true, nil
-		}
-	}
-
-	// Address and prefix allow rules require seeing an answer before the policy
-	// can determine whether an otherwise unknown hostname is useful.
-	if policy.hasAddressAllowRules() && policy.hostnameNotBlockedOnEveryPortLocked(hostname) {
+	if policy.mayResolveLocked(hostname, origins) {
 		return ResolutionAuthorization{query: hostname, origins: origins}, true, nil
 	}
 
@@ -59,11 +51,7 @@ func (policy *Policy) resolutionOriginsLocked(hostname string) []string {
 	return origins
 }
 
-func (policy *Policy) hasAddressAllowRules() bool {
-	return len(policy.allow.addresses) != 0 || len(policy.allow.prefixes) != 0
-}
-
-// CommitResolution validates a DNS result and installs its temporary policy grants.
+// CommitResolution records one authorized runtime resolution before its answer is returned.
 func (policy *Policy) CommitResolution(
 	authorization ResolutionAuthorization,
 	result ResolutionResult,
@@ -84,20 +72,6 @@ func (policy *Policy) CommitResolution(
 	defer policy.dynamic.mutex.Unlock()
 
 	policy.dynamic.removeExpired(now)
-
-	if len(addresses) == 0 && len(chain) > 1 &&
-		!policy.chainMayResolveLocked(authorization.origins, chain) {
-		return false, nil
-	}
-
-	// Refuse the complete answer if any terminal address is unusable. Filtering
-	// individual records would change DNS load-balancing and DNSSEC semantics.
-	for _, address := range addresses {
-		if !policy.addressMayBeUsedLocked(authorization.origins, chain, address) {
-			return false, nil
-		}
-	}
-
 	policy.installResolutionGrantsLocked(authorization.origins, chain, addresses, result.ExpiresAt)
 
 	return true, nil
@@ -146,127 +120,22 @@ func (policy *Policy) installResolutionGrantsLocked(
 	policy.dynamic.enforceLimit()
 }
 
-func (policy *Policy) hostnameMayResolveLocked(hostname string) bool {
-	for _, port := range policy.representativePorts() {
-		if policy.allowsLocked(hostname, netip.Addr{}, port) {
+func (policy *Policy) mayResolveLocked(query string, origins []string) bool {
+	if policy.block.matchesHostnameOnAllPorts(query) {
+		return false
+	}
+
+	if policy.allowArbitraryDNS {
+		return true
+	}
+
+	for _, origin := range origins {
+		if policy.allow.matchesHostnameOnAnyPort(origin) && !policy.block.matchesHostnameOnAllPorts(origin) {
 			return true
 		}
 	}
 
 	return false
-}
-
-func (policy *Policy) hostnameNotBlockedOnEveryPortLocked(hostname string) bool {
-	for _, port := range policy.representativePorts() {
-		if !policy.block.matches(hostname, netip.Addr{}, port) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (policy *Policy) chainMayResolveLocked(origins, chain []string) bool {
-	for _, port := range policy.representativePorts() {
-		potentiallyAllowed := false
-
-		for _, origin := range origins {
-			if policy.allowsLocked(origin, netip.Addr{}, port) {
-				potentiallyAllowed = true
-
-				break
-			}
-		}
-
-		if !potentiallyAllowed && policy.addressRuleMayAllowPort(port) {
-			potentiallyAllowed = true
-		}
-
-		if potentiallyAllowed && !policy.chainBlockedLocked(chain, netip.Addr{}, port) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (policy *Policy) addressRuleMayAllowPort(port uint16) bool {
-	for _, rule := range policy.allow.addresses {
-		if rule.port.matches(port) {
-			return true
-		}
-	}
-
-	for _, rule := range policy.allow.prefixes {
-		if rule.port.matches(port) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (policy *Policy) addressMayBeUsedLocked(origins, chain []string, address netip.Addr) bool {
-	for _, port := range policy.representativePorts() {
-		for _, origin := range origins {
-			if policy.allowsLocked(origin, address, port) && !policy.chainBlockedLocked(chain, address, port) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
-func (policy *Policy) chainBlockedLocked(chain []string, address netip.Addr, port uint16) bool {
-	for _, hostname := range chain {
-		if policy.block.matches(hostname, address, port) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (policy *Policy) representativePorts() []uint16 {
-	specified := make(map[uint16]struct{})
-
-	for _, rules := range []*ruleSet{&policy.allow, &policy.block} {
-		for _, rule := range rules.hosts {
-			if rule.port.set {
-				specified[rule.port.port] = struct{}{}
-			}
-		}
-
-		for _, rule := range rules.addresses {
-			if rule.port.set {
-				specified[rule.port.port] = struct{}{}
-			}
-		}
-
-		for _, rule := range rules.prefixes {
-			if rule.port.set {
-				specified[rule.port.port] = struct{}{}
-			}
-		}
-	}
-
-	ports := make([]uint16, 0, len(specified)+1)
-	for port := range specified {
-		ports = append(ports, port)
-	}
-
-	// One unspecified port represents every port not mentioned by a rule.
-	for port := 1; port <= 65535; port++ {
-		candidate := uint16(port)
-		if _, found := specified[candidate]; !found {
-			ports = append(ports, candidate)
-
-			break
-		}
-	}
-
-	return ports
 }
 
 func (policy *Policy) allowsLocked(hostname string, address netip.Addr, port uint16) bool {

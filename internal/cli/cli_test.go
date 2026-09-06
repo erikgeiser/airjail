@@ -57,6 +57,7 @@ proxy: http://config-proxy.example:8080
 connect_timeout: 20s
 transparent_fallback: false
 allow_unresolved_rules: true
+allow_arbitrary_dns: true
 restrict_sockets: true
 keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 `)
@@ -74,6 +75,7 @@ keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 		"--proxy", "socks5://cli-proxy.example:1080",
 		"--connect-timeout", "3s",
 		"--allow-unresolved-rules=false",
+		"--allow-arbitrary-dns=false",
 		"--disable-transparent-fallback=false",
 		"--restrict-sockets=false",
 		"--keep-unsafe-capability", "CAP_SYS_ADMIN",
@@ -105,6 +107,10 @@ keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 
 	if invocation.Config.AllowUnresolvedRules {
 		t.Error("AllowUnresolvedRules = true, want CLI override false")
+	}
+
+	if invocation.Config.AllowArbitraryDNS {
+		t.Error("AllowArbitraryDNS = true, want CLI override false")
 	}
 
 	if !invocation.Config.TransparentFallback {

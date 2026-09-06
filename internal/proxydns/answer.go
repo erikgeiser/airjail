@@ -30,18 +30,6 @@ type cnamePath struct {
 	ttlSet   bool
 }
 
-func (answer addressAnswer) empty() bool {
-	return len(answer.cnameChain) == 0 && len(answer.addresses) == 0
-}
-
-func (answer addressAnswer) policyResult(now time.Time) policy.ResolutionResult {
-	return policy.ResolutionResult{
-		CNAMEChain: answer.cnameChain,
-		Addresses:  answer.addresses,
-		ExpiresAt:  now.Add(clampTTL(answer.ttl)),
-	}
-}
-
 func parseAddressAnswer(response *dns.Msg, queryHostname string, queryType uint16) (addressAnswer, error) {
 	cnames := make(map[string]*dns.CNAME)
 	addresses := make(map[string][]netip.Addr)

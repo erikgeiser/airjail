@@ -25,6 +25,7 @@ type Config struct {
 	TransparentFallback    bool          `yaml:"transparent_fallback"`
 	RestrictUnixSockets    bool          `yaml:"restrict_sockets"`
 	AllowUnresolvedRules   bool          `yaml:"allow_unresolved_rules"`
+	AllowArbitraryDNS      bool          `yaml:"allow_arbitrary_dns"`
 	KeepUnsafeCapabilities []string      `yaml:"keep_unsafe_capabilities"`
 }
 
