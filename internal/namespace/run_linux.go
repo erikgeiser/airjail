@@ -242,8 +242,8 @@ func shouldManageForeground(
 	return terminal && !joinParentProcessGroup && foregroundProcessGroup == currentProcessGroup
 }
 
-func ownsForegroundJob(terminal bool, foregroundProcessGroup, currentProcessGroup, processID int) bool {
-	return terminal && foregroundProcessGroup == currentProcessGroup && currentProcessGroup == processID
+func ownsTerminalForeground(terminal bool, foregroundProcessGroup, currentProcessGroup int) bool {
+	return terminal && foregroundProcessGroup == currentProcessGroup
 }
 
 func transferTerminalForegroundIfOwned(fromProcessGroup, toProcessGroup int) error {

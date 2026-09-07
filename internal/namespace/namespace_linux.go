@@ -94,11 +94,11 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 		arguments = append(arguments, "--"+cli.SupervisorRestrictSocketsOption)
 	}
 
-	// A foreground wrapper may exit as soon as it starts airjail, allowing the
-	// shell to reclaim the terminal while the supervisor is still starting.
-	// Only a process-group leader can safely authorize later foreground changes.
+	// Decide this in the outer process because the hidden supervisor is never
+	// its process-group leader. Detached sessions have no controlling terminal,
+	// while foreground wrappers such as `go run` legitimately share a job group.
 	terminal, foregroundProcessGroup := terminalForeground()
-	if ownsForegroundJob(terminal, foregroundProcessGroup, unix.Getpgrp(), os.Getpid()) {
+	if ownsTerminalForeground(terminal, foregroundProcessGroup, unix.Getpgrp()) {
 		arguments = append(arguments, "--"+cli.SupervisorManageForegroundOption)
 	}
 

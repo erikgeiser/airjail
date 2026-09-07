@@ -81,7 +81,7 @@ func TestShouldManageForeground(t *testing.T) {
 	}
 }
 
-func TestOwnsForegroundJob(t *testing.T) {
+func TestOwnsTerminalForeground(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -89,36 +89,25 @@ func TestOwnsForegroundJob(t *testing.T) {
 		terminal               bool
 		foregroundProcessGroup int
 		currentProcessGroup    int
-		processID              int
 		want                   bool
 	}{
 		{
-			name:                   "foreground process group leader",
+			name:                   "foreground process group",
 			terminal:               true,
 			foregroundProcessGroup: 10,
 			currentProcessGroup:    10,
-			processID:              10,
 			want:                   true,
 		},
 		{
-			name:                   "foreground launcher child",
-			terminal:               true,
-			foregroundProcessGroup: 10,
-			currentProcessGroup:    10,
-			processID:              11,
-		},
-		{
-			name:                   "background process group leader",
+			name:                   "background process group",
 			terminal:               true,
 			foregroundProcessGroup: 20,
 			currentProcessGroup:    10,
-			processID:              10,
 		},
 		{
 			name:                   "no terminal",
 			foregroundProcessGroup: 10,
 			currentProcessGroup:    10,
-			processID:              10,
 		},
 	}
 
@@ -126,14 +115,13 @@ func TestOwnsForegroundJob(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := ownsForegroundJob(
+			got := ownsTerminalForeground(
 				test.terminal,
 				test.foregroundProcessGroup,
 				test.currentProcessGroup,
-				test.processID,
 			)
 			if got != test.want {
-				t.Errorf("ownsForegroundJob() = %t, want %t", got, test.want)
+				t.Errorf("ownsTerminalForeground() = %t, want %t", got, test.want)
 			}
 		})
 	}
