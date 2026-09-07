@@ -18,6 +18,7 @@ const (
 	SupervisorPreservePermissionsOption = "preserve-permissions"
 	SupervisorRestrictSocketsOption     = "restrict-unix-sockets"
 	SupervisorKeepUnsafeCapability      = "keep-unsafe-capability"
+	SupervisorManageForegroundOption    = "manage-foreground"
 	SupervisorLogLevel                  = "log-level"
 )
 

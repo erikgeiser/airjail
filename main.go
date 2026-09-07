@@ -52,6 +52,7 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		logLevel               string
 		preservePermissions    bool
 		restrictUnixSockets    bool
+		manageForeground       bool
 		keepUnsafeCapabilities []string
 	)
 
@@ -69,6 +70,12 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		cli.SupervisorRestrictSocketsOption,
 		false,
 		"restrict child local sockets",
+	)
+	flags.BoolVar(
+		&manageForeground,
+		cli.SupervisorManageForegroundOption,
+		false,
+		"manage the child terminal foreground process group",
 	)
 	flags.StringArrayVar(
 		&keepUnsafeCapabilities,
@@ -112,6 +119,7 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		SOCKSocket:             socksSocket,
 		PreservePermissions:    preservePermissions,
 		RestrictUnixSockets:    restrictUnixSockets,
+		ManageForeground:       manageForeground,
 		KeepUnsafeCapabilities: keepUnsafeCapabilities,
 		Logger:                 logger,
 	})

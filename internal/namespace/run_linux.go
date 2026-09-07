@@ -20,6 +20,7 @@ type runOptions struct {
 	Directory              string
 	Sys                    *syscall.SysProcAttr
 	JoinParentProcessGroup bool
+	ManageForeground       bool
 	ReapProcessGroup       bool
 	Logger                 *logging.Logger
 }
@@ -35,7 +36,7 @@ func runSandboxedProcess(ctx context.Context, command []string, options runOptio
 	}
 
 	terminal, originalForeground := terminalForeground()
-	manageForeground := shouldManageForeground(
+	manageForeground := options.ManageForeground && shouldManageForeground(
 		terminal,
 		options.JoinParentProcessGroup,
 		originalForeground,
@@ -106,7 +107,7 @@ func runSandboxedProcess(ctx context.Context, command []string, options runOptio
 			logIgnoredError(
 				options.Logger,
 				"restore terminal foreground process group during cleanup",
-				setTerminalForeground(originalForeground),
+				transferTerminalForegroundIfOwned(pid, originalForeground),
 			)
 		}
 
@@ -159,7 +160,7 @@ func runSandboxedProcess(ctx context.Context, command []string, options runOptio
 				logIgnoredError(
 					options.Logger,
 					"restore terminal foreground process group for stopped process",
-					setTerminalForeground(originalForeground),
+					transferTerminalForegroundIfOwned(pid, originalForeground),
 				)
 			}
 
@@ -172,7 +173,7 @@ func runSandboxedProcess(ctx context.Context, command []string, options runOptio
 				logIgnoredError(
 					options.Logger,
 					"restore child terminal foreground process group after resume",
-					setTerminalForeground(pid),
+					transferTerminalForegroundIfOwned(originalForeground, pid),
 				)
 			}
 
@@ -239,6 +240,19 @@ func shouldManageForeground(
 	currentProcessGroup int,
 ) bool {
 	return terminal && !joinParentProcessGroup && foregroundProcessGroup == currentProcessGroup
+}
+
+func ownsForegroundJob(terminal bool, foregroundProcessGroup, currentProcessGroup, processID int) bool {
+	return terminal && foregroundProcessGroup == currentProcessGroup && currentProcessGroup == processID
+}
+
+func transferTerminalForegroundIfOwned(fromProcessGroup, toProcessGroup int) error {
+	terminal, foregroundProcessGroup := terminalForeground()
+	if !terminal || foregroundProcessGroup != fromProcessGroup {
+		return nil
+	}
+
+	return setTerminalForeground(toProcessGroup)
 }
 
 func setTerminalForeground(processGroup int) error {

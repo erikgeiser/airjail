@@ -94,6 +94,14 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 		arguments = append(arguments, "--"+cli.SupervisorRestrictSocketsOption)
 	}
 
+	// A foreground wrapper may exit as soon as it starts airjail, allowing the
+	// shell to reclaim the terminal while the supervisor is still starting.
+	// Only a process-group leader can safely authorize later foreground changes.
+	terminal, foregroundProcessGroup := terminalForeground()
+	if ownsForegroundJob(terminal, foregroundProcessGroup, unix.Getpgrp(), os.Getpid()) {
+		arguments = append(arguments, "--"+cli.SupervisorManageForegroundOption)
+	}
+
 	for _, capability := range keptCapabilities {
 		arguments = append(arguments, "--"+cli.SupervisorKeepUnsafeCapability, capability)
 	}
@@ -166,6 +174,7 @@ type SupervisorOptions struct {
 	SOCKSocket             string
 	PreservePermissions    bool
 	RestrictUnixSockets    bool
+	ManageForeground       bool
 	KeepUnsafeCapabilities []string
 	Logger                 *logging.Logger
 }
@@ -290,6 +299,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			Environment:      options.Environment,
 			Directory:        options.Directory,
 			Sys:              childProcessAttributes,
+			ManageForeground: options.ManageForeground,
 			ReapProcessGroup: true,
 			Logger:           logger,
 		})
