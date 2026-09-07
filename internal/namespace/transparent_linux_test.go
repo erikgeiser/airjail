@@ -70,29 +70,43 @@ func TestParseOriginalDestinationRejectsMalformedAddress(t *testing.T) {
 	}
 }
 
-func TestDNSUDPResponseRewriteRestoresResolverPort(t *testing.T) {
+func TestTransparentDNSUDPDestinationNAT(t *testing.T) {
 	t.Parallel()
 
-	expressions := dnsUDPResponsePortExpressions()
-	if len(expressions) != 6 {
-		t.Fatalf("expression count = %d, want 6", len(expressions))
+	gateway := netip.MustParseAddr("127.97.105.114")
+
+	expressions := transparentDNSUDPExpressions(gateway, unix.NFPROTO_IPV4)
+	if len(expressions) != 7 {
+		t.Fatalf("expression count = %d, want 7", len(expressions))
 	}
 
-	sourcePort, ok := expressions[2].(*expr.Payload)
-	if !ok || sourcePort.Base != expr.PayloadBaseTransportHeader || sourcePort.Offset != 0 || sourcePort.Len != 2 {
-		t.Fatalf("source-port expression = %#v", expressions[2])
+	destinationPort, ok := expressions[2].(*expr.Payload)
+	if !ok || destinationPort.Base != expr.PayloadBaseTransportHeader ||
+		destinationPort.Offset != 2 || destinationPort.Len != 2 {
+		t.Fatalf("destination-port expression = %#v", expressions[2])
 	}
 
-	translatedPort, ok := expressions[4].(*expr.Immediate)
-	if !ok || !slices.Equal(translatedPort.Data, binaryutil.BigEndian.PutUint16(53)) {
-		t.Fatalf("translated-port expression = %#v", expressions[4])
+	translatedAddress, ok := expressions[4].(*expr.Immediate)
+	if !ok || !slices.Equal(translatedAddress.Data, gateway.AsSlice()) {
+		t.Fatalf("translated-address expression = %#v", expressions[4])
 	}
 
-	rewrite, ok := expressions[5].(*expr.Payload)
-	if !ok || rewrite.OperationType != expr.PayloadWrite || rewrite.SourceRegister != 1 ||
-		rewrite.Base != expr.PayloadBaseTransportHeader || rewrite.Offset != 0 || rewrite.Len != 2 ||
-		rewrite.CsumType != expr.CsumTypeInet || rewrite.CsumOffset != 6 {
-		t.Fatalf("source-port rewrite expression = %#v", expressions[5])
+	translatedPort, ok := expressions[5].(*expr.Immediate)
+	if !ok || !slices.Equal(translatedPort.Data, binaryutil.BigEndian.PutUint16(dnsPort)) {
+		t.Fatalf("translated-port expression = %#v", expressions[5])
+	}
+
+	translation, ok := expressions[6].(*expr.NAT)
+	if !ok || translation.Type != expr.NATTypeDestNAT || translation.Family != unix.NFPROTO_IPV4 ||
+		translation.RegAddrMin != 1 || translation.RegProtoMin != 2 {
+		t.Fatalf("destination-NAT expression = %#v", expressions[6])
+	}
+
+	for _, expression := range expressions {
+		payload, isPayload := expression.(*expr.Payload)
+		if isPayload && payload.OperationType == expr.PayloadWrite {
+			t.Fatalf("DNS destination NAT contains a payload-write expression: %#v", payload)
+		}
 	}
 }
 

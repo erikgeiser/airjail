@@ -165,10 +165,8 @@ type bridgeServer struct {
 }
 
 type dnsPacketServer struct {
-	connection      *net.UDPConn
-	responseWriter  dnsUDPResponseWriter
-	forwarder       *dnsUDPForwarder
-	ipv6Destination bool
+	connection *net.UDPConn
+	forwarder  *dnsUDPForwarder
 }
 
 func namespaceProcessAttributes(mode Mode) *syscall.SysProcAttr {
@@ -208,7 +206,6 @@ type SupervisorOptions struct {
 	Logger                 *logging.Logger
 }
 
-//nolint:maintidx
 func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) {
 	options.Logger = options.Logger.WithPrefix("supervisor")
 
@@ -356,12 +353,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 
 	for _, server := range packetServers {
 		group.Go(func() error {
-			err := server.forwarder.Serve(
-				groupCtx,
-				server.connection,
-				server.responseWriter,
-				server.ipv6Destination,
-			)
+			err := server.forwarder.Serve(groupCtx, server.connection)
 			if err != nil {
 				return err
 			}
@@ -524,10 +516,9 @@ func createDNSBridgeServers(
 		tcpNetwork string
 		udpNetwork string
 		address    string
-		ipv6       bool
 	}{
 		{tcpNetwork: "tcp4", udpNetwork: "udp4", address: DNSIPv4Address},
-		{tcpNetwork: "tcp6", udpNetwork: "udp6", address: DNSIPv6Address, ipv6: true},
+		{tcpNetwork: "tcp6", udpNetwork: "udp6", address: DNSIPv6Address},
 	} {
 		listener, err := listenConfig.Listen(ctx, endpoint.tcpNetwork, endpoint.address)
 		if err != nil {
@@ -541,7 +532,7 @@ func createDNSBridgeServers(
 
 		servers = append(servers, bridgeServer{listener: listener, server: newForwarder(socketPath)})
 
-		udpConnection, err := createDNSUDPQuerySocket(ctx, endpoint.udpNetwork, endpoint.ipv6)
+		udpConnection, err := createDNSUDPSocket(ctx, endpoint.udpNetwork, endpoint.address)
 		if err != nil {
 			closeBridgeListeners(servers)
 			closeDNSPacketServers(packetServers)
@@ -549,23 +540,9 @@ func createDNSBridgeServers(
 			return nil, nil, fmt.Errorf("listen on inner DNS UDP gateway %s: %w", endpoint.address, err)
 		}
 
-		err = enableOriginalDNSDestination(udpConnection, endpoint.ipv6)
-		if err != nil {
-			_ = udpConnection.Close()
-
-			closeBridgeListeners(servers)
-			closeDNSPacketServers(packetServers)
-
-			return nil, nil, err
-		}
-
-		responseWriter := createDNSUDPResponseWriter(udpConnection, endpoint.ipv6)
-
 		packetServers = append(packetServers, dnsPacketServer{
-			connection:      udpConnection,
-			responseWriter:  responseWriter,
-			forwarder:       newDNSUDPForwarder(socketPath, logger),
-			ipv6Destination: endpoint.ipv6,
+			connection: udpConnection,
+			forwarder:  newDNSUDPForwarder(socketPath, logger),
 		})
 	}
 
@@ -621,6 +598,5 @@ func closeBridgeListeners(servers []bridgeServer) {
 func closeDNSPacketServers(servers []dnsPacketServer) {
 	for _, server := range servers {
 		_ = server.connection.Close()
-		_ = server.responseWriter.Close()
 	}
 }

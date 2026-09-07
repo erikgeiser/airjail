@@ -18,11 +18,6 @@ const (
 	dnsForwardTimeout    = 10 * time.Second
 )
 
-type dnsUDPResponseWriter interface {
-	WriteResponse(response []byte, client, source netip.AddrPort) error
-	Close() error
-}
-
 type dnsUDPForwarder struct {
 	socketPath string
 	logger     *logging.Logger
@@ -38,28 +33,21 @@ func newDNSUDPForwarder(socketPath string, logger *logging.Logger) *dnsUDPForwar
 	}
 }
 
-func (forwarder *dnsUDPForwarder) Serve(
-	ctx context.Context,
-	connection *net.UDPConn,
-	responseWriter dnsUDPResponseWriter,
-	ipv6Destination bool,
-) error {
-	stopShutdown := forwarder.connections.ShutdownOnContext(ctx, connection, responseWriter)
+func (forwarder *dnsUDPForwarder) Serve(ctx context.Context, connection *net.UDPConn) error {
+	stopShutdown := forwarder.connections.ShutdownOnContext(ctx, connection)
 	defer stopShutdown()
 
 	defer func() {
 		_ = connection.Close()
-		_ = responseWriter.Close()
 
 		forwarder.connections.Close()
 		forwarder.connections.Wait()
 	}()
 
 	buffer := make([]byte, maxDNSUDPMessageSize+1)
-	control := make([]byte, 128)
 
 	for {
-		read, controlRead, _, client, err := connection.ReadMsgUDPAddrPort(buffer, control)
+		read, client, err := connection.ReadFromUDPAddrPort(buffer)
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
@@ -78,19 +66,10 @@ func (forwarder *dnsUDPForwarder) Serve(
 			continue
 		}
 
-		destination, err := parseOriginalDNSDestination(control[:controlRead], ipv6Destination)
-		if err != nil {
-			forwarder.logger.Debugf(
-				"ignoring DNS query because original UDP destination could not be discovered: %v",
-				err)
-
-			continue
-		}
-
 		request := bytes.Clone(buffer[:read])
 
 		forwarder.connections.Go(func(scope *stream.ConnScope) {
-			err := forwarder.forward(ctx, scope, responseWriter, client, destination, request)
+			err := forwarder.forward(ctx, scope, connection, client, request)
 			if err != nil {
 				forwarder.logger.Debugf("could not forward DNS message: %v", err)
 			}
@@ -101,9 +80,8 @@ func (forwarder *dnsUDPForwarder) Serve(
 func (forwarder *dnsUDPForwarder) forward(
 	ctx context.Context,
 	scope *stream.ConnScope,
-	responseWriter dnsUDPResponseWriter,
+	responseWriter *net.UDPConn,
 	client netip.AddrPort,
-	destination netip.AddrPort,
 	request []byte,
 ) error {
 	connection, err := (&net.Dialer{}).DialContext(ctx, "unix", forwarder.socketPath)
@@ -136,7 +114,7 @@ func (forwarder *dnsUDPForwarder) forward(
 		return fmt.Errorf("read response frame: %w", err)
 	}
 
-	err = responseWriter.WriteResponse(response, client, destination)
+	_, err = responseWriter.WriteToUDPAddrPort(response, client)
 	if err != nil {
 		return fmt.Errorf("send DNS reply to client: %w", err)
 	}
