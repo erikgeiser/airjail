@@ -148,20 +148,19 @@ Use `--disable-transparent-fallback` or `transparent_fallback: false` for
 proxy-only operation. In that mode, applications that ignore the injected HTTP
 and SOCKS proxy settings have no network egress.
 
-By default, loopback destinations refer to services in the outer namespace.
-Use `--private-loopback` or `private_loopback: true` to keep `127.0.0.0/8` and
-`::1` connections inside the child namespace instead. `localhost` and names
-below `.localhost` receive synthetic loopback DNS answers in this mode. DNS
-traffic itself remains intercepted and filtered. Outer localhost remains
-available to applications that explicitly use an airjail proxy and override
-the private-loopback `NO_PROXY` exclusion.
+By default, loopback destinations refer to services in the outer namespace. Use
+`--private-loopback` or `private_loopback: true` to keep `127.0.0.0/8` and `::1`
+connections inside the child namespace instead. Outer localhost remains
+available to applications that explicitly use an airjail proxy and override the
+private-loopback `NO_PROXY` exclusion.
 
 By default, exact hostname rules and their CNAME aliases are answered from the
 startup snapshot without another upstream query. Only names matched by wildcard
 hostname allow rules, including authorized CNAME chains, may reach an upstream
 DNS resolver. IP/CIDR-only and block-only policies therefore do not resolve
 child-supplied hostnames. Use `--allow-arbitrary-dns` or `allow_arbitrary_dns:
-true` to permit arbitrary A/AAAA names to be resolved. Connection policy is
+true` to allow DNS resolution when IP/CIDR block rules and no domain allow rules
+are present if the risk of DNS exfiltration is acceptable. Connection policy is
 still enforced on every answer, but query names can carry data to an
 authoritative DNS server.
 
@@ -286,9 +285,9 @@ isolation may still be desired in order to avoid the following issues:
 
 ## Roadmap and Missing Features
 
-- **Extensive DNS and UDP support:** Filtered DNS currently supports A and AAAA
-  queries with CNAME chains. HTTPS/SVCB records for ECH, arbitrary UDP, and
-  upstream SOCKS5 UDP ASSOCIATE support are planned afterwards.
+- **Extensive DNS Support:** Filtered DNS currently supports A and AAAA queries
+  with CNAME chains. MX and HTTPS/SVCB records for ECH are planned.
+- **UDP Support:** Support for UDP egress is planned.
 - **Inbound Traffic:** Currently `airjail` prevents other processes from
   accessing ports opened by the sandboxed process. An `--expose` option is
   planned that forwards out-of-namespace traffic into the sandbox.
