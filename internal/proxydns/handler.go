@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/erikgeiser/airjail/internal/policy"
@@ -22,6 +23,16 @@ func (server *Server) handle(ctx context.Context, wireRequest []byte) []byte {
 	query, errorResponse := validateClientRequest(wireRequest)
 	if errorResponse != nil {
 		return errorResponse
+	}
+
+	if server.privateLoopback &&
+		(query.hostname == "localhost" || strings.HasSuffix(query.hostname, ".localhost")) {
+		server.logger.Allowf(dns.TypeToString[query.queryType] + " " + query.hostname)
+
+		return packAddressResponse(query, []netip.Addr{
+			netip.MustParseAddr("127.0.0.1"),
+			netip.MustParseAddr("::1"),
+		}, uint32(minimumGrantTTL/time.Second))
 	}
 
 	now := time.Now()

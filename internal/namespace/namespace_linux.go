@@ -77,6 +77,7 @@ type ParentOptions struct {
 	RestrictUnixSockets    bool
 	KeepUnsafeCapabilities []string
 	TransparentTCP         bool
+	PrivateLoopback        bool
 	Logger                 *logging.Logger
 }
 
@@ -122,6 +123,10 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 
 	if options.TransparentTCP {
 		arguments = append(arguments, "--"+cli.SupervisorTransparentTCPOption)
+	}
+
+	if options.PrivateLoopback {
+		arguments = append(arguments, "--"+cli.SupervisorPrivateLoopbackOption)
 	}
 
 	arguments = append(arguments, "--"+cli.SupervisorLogLevel, options.Logger.LevelName())
@@ -203,10 +208,12 @@ type SupervisorOptions struct {
 	ManageForeground       bool
 	KeepUnsafeCapabilities []string
 	TransparentTCP         bool
+	PrivateLoopback        bool
 	Logger                 *logging.Logger
 }
 
-func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) {
+// Namespace setup requires ordered cleanup for each partially initialized resource.
+func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) { //nolint:maintidx
 	options.Logger = options.Logger.WithPrefix("supervisor")
 
 	for _, socketPath := range []string{options.HTTPSocket, options.SOCKSocket, options.DNSSocket} {
@@ -308,7 +315,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 
 		servers = append(servers, transparentServers...)
 
-		err = installTransparentRules()
+		err = installTransparentRules(options.PrivateLoopback)
 		if err != nil {
 			closeBridgeListeners(servers)
 			closeDNSPacketServers(packetServers)

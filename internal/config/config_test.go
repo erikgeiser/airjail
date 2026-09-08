@@ -19,6 +19,7 @@ log: debug
 proxy: http://proxy.example:8080
 connect_timeout: 3s
 transparent_fallback: false
+private_loopback: true
 allow_unresolved_rules: true
 allow_arbitrary_dns: true
 restrict_sockets: true
@@ -52,6 +53,10 @@ keep_unsafe_capabilities: [CAP_SYS_ADMIN]
 
 	if loaded.TransparentFallback {
 		t.Error("TransparentFallback = true, want false")
+	}
+
+	if !loaded.PrivateLoopback {
+		t.Error("PrivateLoopback = false, want true")
 	}
 
 	if !loaded.AllowUnresolvedRules {

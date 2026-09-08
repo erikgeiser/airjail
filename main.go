@@ -84,6 +84,7 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		ManageForeground:       invocation.ManageForeground,
 		KeepUnsafeCapabilities: invocation.KeepUnsafeCapabilities,
 		TransparentTCP:         invocation.TransparentTCP,
+		PrivateLoopback:        invocation.PrivateLoopback,
 		Logger:                 logger,
 	})
 }

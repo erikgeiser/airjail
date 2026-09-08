@@ -119,7 +119,7 @@ separated with `--` for clarity. The following two invocations are identical:
 $ airjail \
     --allow "127.0.0.1/8" --allow "example.com" --allow '*.example.com' \
     --block "bad.example.com" --block "127.0.0.1:53" \
-    --restrict-sockets --disable-transparent-fallback \
+    --restrict-sockets --disable-transparent-fallback --private-loopback \
     program -flag-a arg-b
 $ airjail --config airjail.yml -- program -flag-a arg-b
 ```
@@ -140,12 +140,21 @@ allow_arbitrary_dns: false
 proxy: http://proxy.example:8080
 connect_timeout: 5s
 transparent_fallback: false
+private_loopback: true
 ```
 
 Transparent TCP and filtered DNS are enabled by default for non-empty policies.
 Use `--disable-transparent-fallback` or `transparent_fallback: false` for
 proxy-only operation. In that mode, applications that ignore the injected HTTP
 and SOCKS proxy settings have no network egress.
+
+By default, loopback destinations refer to services in the outer namespace.
+Use `--private-loopback` or `private_loopback: true` to keep `127.0.0.0/8` and
+`::1` connections inside the child namespace instead. `localhost` and names
+below `.localhost` receive synthetic loopback DNS answers in this mode. DNS
+traffic itself remains intercepted and filtered. Outer localhost remains
+available to applications that explicitly use an airjail proxy and override
+the private-loopback `NO_PROXY` exclusion.
 
 By default, exact hostname rules and their CNAME aliases are answered from the
 startup snapshot without another upstream query. Only names matched by wildcard

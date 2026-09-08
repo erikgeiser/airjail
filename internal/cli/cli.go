@@ -23,6 +23,7 @@ const (
 	SupervisorKeepUnsafeCapability      = "keep-unsafe-capability"
 	SupervisorManageForegroundOption    = "manage-foreground"
 	SupervisorTransparentTCPOption      = "transparent-tcp"
+	SupervisorPrivateLoopbackOption     = "private-loopback"
 	SupervisorLogLevel                  = "log-level"
 )
 
@@ -52,6 +53,7 @@ type SupervisorInvocation struct {
 	ManageForeground       bool
 	KeepUnsafeCapabilities []string
 	TransparentTCP         bool
+	PrivateLoopback        bool
 }
 
 type flagValues struct {
@@ -64,6 +66,7 @@ type flagValues struct {
 	allowUnresolved            bool
 	allowArbitraryDNS          bool
 	disableTransparentFallback bool
+	privateLoopback            bool
 	restrictUnixSockets        bool
 	keepUnsafeCapabilities     []string
 	version                    bool
@@ -87,6 +90,8 @@ func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
 		"Allow arbitrary child-controlled names to reach upstream DNS resolvers")
 	flags.BoolVar(&values.disableTransparentFallback, "disable-transparent-fallback", false,
 		"Disable transparent TCP and DNS interception")
+	flags.BoolVar(&values.privateLoopback, "private-loopback", false,
+		"Keep loopback connections inside the child network namespace")
 	flags.BoolVar(&values.restrictUnixSockets, "restrict-sockets", false,
 		"Restrict creation of Unix and vsock sockets")
 	flags.StringArrayVar(&values.keepUnsafeCapabilities, "keep-unsafe-capability", nil,
@@ -136,6 +141,12 @@ func ParseSupervisor(args []string) (SupervisorInvocation, error) {
 		SupervisorTransparentTCPOption,
 		false,
 		"redirect non-proxy TCP connections",
+	)
+	flags.BoolVar(
+		&invocation.PrivateLoopback,
+		SupervisorPrivateLoopbackOption,
+		false,
+		"keep loopback connections in the child namespace",
 	)
 
 	err := flags.Parse(args)
@@ -246,6 +257,10 @@ func Parse(args []string) (Invocation, error) {
 
 	if flags.Changed("disable-transparent-fallback") {
 		effective.TransparentFallback = !values.disableTransparentFallback
+	}
+
+	if flags.Changed("private-loopback") {
+		effective.PrivateLoopback = values.privateLoopback
 	}
 
 	if flags.Changed("restrict-sockets") {

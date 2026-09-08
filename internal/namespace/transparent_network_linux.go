@@ -56,10 +56,20 @@ func configureTransparentRoutes() error {
 	return nil
 }
 
-func installTransparentRules() error {
+func installTransparentRules(privateLoopback bool) error {
 	connection, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("open nftables connection: %w", err)
+	}
+
+	var (
+		ipv4ExemptPrefix *netip.Prefix
+		ipv6ExemptPrefix *netip.Prefix
+	)
+
+	if privateLoopback {
+		ipv4ExemptPrefix = new(netip.MustParsePrefix("127.0.0.0/8"))
+		ipv6ExemptPrefix = new(netip.MustParsePrefix("::1/128"))
 	}
 
 	addTransparentTable(
@@ -69,6 +79,7 @@ func installTransparentRules() error {
 		unix.NFPROTO_IPV4,
 		16,
 		[]uint16{19080, 19081, transparentTCPPort, dnsPort},
+		ipv4ExemptPrefix,
 	)
 	addTransparentTable(
 		connection,
@@ -77,6 +88,7 @@ func installTransparentRules() error {
 		unix.NFPROTO_IPV6,
 		24,
 		[]uint16{transparentTCPPort, dnsPort},
+		ipv6ExemptPrefix,
 	)
 
 	err = connection.Flush()
@@ -94,6 +106,7 @@ func addTransparentTable(
 	natFamily uint32,
 	destinationOffset uint32,
 	exemptPorts []uint16,
+	exemptPrefix *netip.Prefix,
 ) {
 	table := connection.AddTable(&nftables.Table{Family: family, Name: transparentTableName})
 
@@ -124,6 +137,14 @@ func addTransparentTable(
 		Exprs: transparentDNSUDPExpressions(gateway, natFamily),
 	})
 
+	if exemptPrefix != nil {
+		connection.AddRule(&nftables.Rule{
+			Table: table,
+			Chain: chain,
+			Exprs: privateLoopbackExpressions(*exemptPrefix, destinationOffset),
+		})
+	}
+
 	connection.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
@@ -140,6 +161,37 @@ func addTransparentTable(
 			},
 		},
 	})
+}
+
+func privateLoopbackExpressions(prefix netip.Prefix, destinationOffset uint32) []expr.Any {
+	address := prefix.Masked().Addr().AsSlice()
+
+	mask := make([]byte, len(address))
+	for bit := range prefix.Bits() {
+		mask[bit/8] |= 1 << (7 - uint(bit%8))
+	}
+
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_TCP}},
+		&expr.Payload{
+			DestRegister: 1,
+			Base:         expr.PayloadBaseNetworkHeader,
+			Offset:       destinationOffset,
+			Len:          uint32(len(address)),
+		},
+		&expr.Bitwise{
+			SourceRegister: 1,
+			DestRegister:   1,
+			Len:            uint32(len(address)),
+			Mask:           mask,
+			Xor:            make([]byte, len(address)),
+		},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: address},
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 2, Len: 2},
+		&expr.Cmp{Op: expr.CmpOpNeq, Register: 1, Data: binaryutil.BigEndian.PutUint16(53)},
+		&expr.Verdict{Kind: expr.VerdictReturn},
+	}
 }
 
 func transparentDNSUDPExpressions(gateway netip.Addr, natFamily uint32) []expr.Any {

@@ -56,6 +56,7 @@ log: debug
 proxy: http://config-proxy.example:8080
 connect_timeout: 20s
 transparent_fallback: false
+private_loopback: true
 allow_unresolved_rules: true
 allow_arbitrary_dns: true
 restrict_sockets: true
@@ -77,6 +78,7 @@ keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 		"--allow-unresolved-rules=false",
 		"--allow-arbitrary-dns=false",
 		"--disable-transparent-fallback=false",
+		"--private-loopback=false",
 		"--restrict-sockets=false",
 		"--keep-unsafe-capability", "CAP_SYS_ADMIN",
 		"command",
@@ -115,6 +117,10 @@ keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 
 	if !invocation.Config.TransparentFallback {
 		t.Error("TransparentFallback = false, want CLI override true")
+	}
+
+	if invocation.Config.PrivateLoopback {
+		t.Error("PrivateLoopback = true, want CLI override false")
 	}
 
 	if invocation.Config.RestrictUnixSockets {
@@ -191,6 +197,7 @@ func TestParseSupervisor(t *testing.T) {
 		"--manage-foreground",
 		"--keep-unsafe-capability", "CAP_SYS_ADMIN",
 		"--transparent-tcp",
+		"--private-loopback",
 		"--",
 		"command", "--child-flag",
 	})
@@ -204,7 +211,7 @@ func TestParseSupervisor(t *testing.T) {
 	}
 
 	if invocation.LogLevel != "debug" || !invocation.PreservePermissions || !invocation.RestrictUnixSockets ||
-		!invocation.ManageForeground || !invocation.TransparentTCP {
+		!invocation.ManageForeground || !invocation.TransparentTCP || !invocation.PrivateLoopback {
 		t.Errorf("supervisor options = %#v", invocation)
 	}
 

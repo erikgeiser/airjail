@@ -23,6 +23,55 @@ func (upstream upstreamFunc) Exchange(ctx context.Context, request *dns.Msg) (*d
 	return upstream(ctx, request)
 }
 
+func TestDNSPrivateLoopbackReturnsSyntheticLocalhostAnswers(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	server, _ := newTestServer(t, []string{"192.0.2.0/24"}, nil, func(request *dns.Msg) *dns.Msg {
+		called = true
+
+		response := new(dns.Msg)
+		response.SetReply(request)
+
+		return response
+	})
+	server.privateLoopback = true
+
+	tests := []struct {
+		hostname  string
+		queryType uint16
+		want      string
+	}{
+		{hostname: "localhost.", queryType: dns.TypeA, want: "127.0.0.1"},
+		{hostname: "service.localhost.", queryType: dns.TypeAAAA, want: "::1"},
+	}
+
+	for _, test := range tests {
+		response := exchangeTestQuery(t, server, test.hostname, test.queryType)
+		if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
+			t.Fatalf(
+				"response for %s = %s with %d answers",
+				test.hostname,
+				dns.RcodeToString[response.Rcode],
+				len(response.Answer),
+			)
+		}
+
+		address := response.Answer[0].String()
+		if test.queryType == dns.TypeA {
+			if record, ok := response.Answer[0].(*dns.A); !ok || record.A.String() != test.want {
+				t.Errorf("answer for %s = %s, want %s", test.hostname, address, test.want)
+			}
+		} else if record, ok := response.Answer[0].(*dns.AAAA); !ok || record.AAAA.String() != test.want {
+			t.Errorf("answer for %s = %s, want %s", test.hostname, address, test.want)
+		}
+	}
+
+	if called {
+		t.Fatal("private localhost query reached upstream resolver")
+	}
+}
+
 func TestDNSConfiguredSnapshotDoesNotReachUpstream(t *testing.T) {
 	t.Parallel()
 

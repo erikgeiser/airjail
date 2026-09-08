@@ -3,6 +3,7 @@ package application
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -45,6 +46,22 @@ func TestCreateAndClose(t *testing.T) {
 	_, err = os.Stat(created.Directory)
 	if !os.IsNotExist(err) {
 		t.Errorf("session still exists after Close: %v", err)
+	}
+}
+
+func TestPrivateLoopbackChildEnvironment(t *testing.T) {
+	t.Parallel()
+
+	environment := childEnvironment([]string{"PATH=/bin", "NO_PROXY=original"}, true, true)
+
+	for _, expected := range []string{
+		"PATH=/bin",
+		"NO_PROXY=localhost,.localhost,127.0.0.1,127.0.0.0/8,::1",
+		"no_proxy=localhost,.localhost,127.0.0.1,127.0.0.0/8,::1",
+	} {
+		if !slices.Contains(environment, expected) {
+			t.Errorf("environment does not contain %q: %v", expected, environment)
+		}
 	}
 }
 

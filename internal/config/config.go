@@ -23,6 +23,7 @@ type Config struct {
 	Proxy                  string        `yaml:"proxy"`
 	ConnectTimeout         time.Duration `yaml:"connect_timeout"`
 	TransparentFallback    bool          `yaml:"transparent_fallback"`
+	PrivateLoopback        bool          `yaml:"private_loopback"`
 	RestrictUnixSockets    bool          `yaml:"restrict_sockets"`
 	AllowUnresolvedRules   bool          `yaml:"allow_unresolved_rules"`
 	AllowArbitraryDNS      bool          `yaml:"allow_arbitrary_dns"`

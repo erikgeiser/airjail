@@ -117,7 +117,7 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 		return 0, err
 	}
 
-	environment := childEnvironment(os.Environ(), !networkPolicy.Empty())
+	environment := childEnvironment(os.Environ(), !networkPolicy.Empty(), invocation.Config.PrivateLoopback)
 
 	if invocation.Config.AllowArbitraryDNS {
 		logger.Infof("arbitrary DNS resolution enabled")
@@ -134,6 +134,7 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 			Mode:                   namespaceMode,
 			RestrictUnixSockets:    invocation.Config.RestrictUnixSockets,
 			KeepUnsafeCapabilities: invocation.Config.KeepUnsafeCapabilities,
+			PrivateLoopback:        invocation.Config.PrivateLoopback,
 			Logger:                 logger,
 		})
 	}
@@ -152,6 +153,7 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 		invocation.Config.Proxy,
 		invocation.Config.ConnectTimeout,
 		invocation.Config.TransparentFallback,
+		invocation.Config.PrivateLoopback,
 		logger,
 	)
 }
@@ -170,6 +172,7 @@ func runWithProxies(
 	proxyURL string,
 	connectTimeout time.Duration,
 	transparentFallback bool,
+	privateLoopback bool,
 	logger *logging.Logger,
 ) (int, error) {
 	if !transparentFallback {
@@ -262,7 +265,12 @@ func runWithProxies(
 	var dnsServer *proxydns.Server
 
 	if transparentFallback {
-		dnsServer, err = proxydns.NewWithResolver(networkPolicy, dnsResolver, logger.WithPrefix("DNS proxy"))
+		dnsServer, err = proxydns.NewWithResolver(
+			networkPolicy,
+			dnsResolver,
+			privateLoopback,
+			logger.WithPrefix("DNS proxy"),
+		)
 		if err != nil {
 			return 0, err
 		}
@@ -329,6 +337,7 @@ func runWithProxies(
 			RestrictUnixSockets:    restrictUnixSockets,
 			KeepUnsafeCapabilities: keepUnsafeCapabilities,
 			TransparentTCP:         transparentFallback,
+			PrivateLoopback:        privateLoopback,
 			Logger:                 logger,
 		})
 		commandResults <- commandResult{exitCode: exitCode, err: runErr}
@@ -399,7 +408,7 @@ func logSupplementaryGroupLimitation(logger *logging.Logger) {
 		strings.Join(supplementaryGroups, ", "))
 }
 
-func childEnvironment(original []string, proxyMode bool) []string {
+func childEnvironment(original []string, proxyMode, privateLoopback bool) []string {
 	proxyNames := []string{
 		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "GRPC_PROXY", "FTP_PROXY", "NO_PROXY",
 		"http_proxy", "https_proxy", "all_proxy", "grpc_proxy", "ftp_proxy", "no_proxy",
@@ -419,6 +428,11 @@ func childEnvironment(original []string, proxyMode bool) []string {
 		return environment
 	}
 
+	noProxy := ""
+	if privateLoopback {
+		noProxy = "localhost,.localhost,127.0.0.1,127.0.0.0/8,::1"
+	}
+
 	return append(environment,
 		"HTTP_PROXY=http://"+namespace.HTTPAddress,
 		"HTTPS_PROXY=http://"+namespace.HTTPAddress,
@@ -430,7 +444,7 @@ func childEnvironment(original []string, proxyMode bool) []string {
 		"all_proxy=socks5h://"+namespace.SOCKAddress,
 		"grpc_proxy=http://"+namespace.HTTPAddress,
 		"ftp_proxy=socks5h://"+namespace.SOCKAddress,
-		"NO_PROXY=",
-		"no_proxy=",
+		"NO_PROXY="+noProxy,
+		"no_proxy="+noProxy,
 	)
 }
