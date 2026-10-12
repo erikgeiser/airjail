@@ -93,7 +93,7 @@ func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
 	flags.BoolVar(&values.privateLoopback, "private-loopback", false,
 		"Keep loopback connections inside the child network namespace")
 	flags.BoolVar(&values.restrictUnixSockets, "restrict-sockets", false,
-		"Restrict creation of Unix and vsock sockets")
+		"Restrict access to Unix and vsock sockets")
 	flags.StringArrayVar(&values.keepUnsafeCapabilities, "keep-unsafe-capability", nil,
 		"Preserve an otherwise dropped dangerous `capability` (repeatable)")
 	flags.BoolVar(&values.version, "version", false, "Print version and exit")

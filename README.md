@@ -79,17 +79,22 @@ Each rule can reference destinations in multiple ways:
 
 **Local Sockets:**
 
-Airjail can optionally deny creation of Unix domain and vsock sockets. While
-Unix sockets are local IPC rather than network access, they can often be used to
+Airjail can optionally restrict Unix domain and vsock sockets. While Unix
+sockets are local IPC rather than network access, they can often be used to
 circumvent network restrictions. Vsock can similarly reach host or hypervisor
 services without traversing the network namespace. For example, when SSH is used
 with the `ControlMaster` feature on the host, network isolated processes could
 connect to the `ControlMaster` socket in order to SSH into machines through an
-existing connection that was established outside of the network isolation. On
-the other hand, Unix domain sockets are also used extensively for normal
-purposes. As such, this feature remains opt-in. Alternatively, however,
-`airjail` can be used together with `firejail`, `bubblewrap` or a container to
-remove dangerous sockets from the filesystem.
+existing connection that was established outside of the network isolation.
+
+On systems with Landlock ABI 9 or newer, `--restrict-sockets` denies connections
+to pathname and abstract Unix sockets created outside the sandbox while allowing
+Unix sockets and socket pairs created by the sandboxed process and its
+descendants. Vsock remains unavailable. If this Landlock support is unavailable,
+airjail emits a warning and falls back to denying all Unix and vsock socket
+creation. The feature remains opt-in. Alternatively, `airjail` can be used
+together with `firejail`, `bubblewrap` or a container to remove dangerous
+sockets from the filesystem.
 
 **Dangerous Capabilities:**
 

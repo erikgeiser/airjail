@@ -24,11 +24,42 @@ func ExecRestricted(command []string, logger *logging.Logger) error {
 		return fmt.Errorf("look up restricted command %q: %w", command[0], err)
 	}
 
-	logger.Debugf("install local socket restrictions")
+	abi, err := landlockABIVersion()
+	landlockEnabled := err == nil && landlockUnixSocketsAvailable(abi, runtime.GOARCH)
+
+	switch {
+	case err != nil && !landlockUnavailable(err):
+		return fmt.Errorf("restrict local sockets: %w", err)
+	case err != nil:
+		logger.Debugf("landlock is unavailable: %v", err)
+	case abi < landlockUnixSocketABI:
+		logger.Debugf("landlock ABI %d does not support pathname Unix socket isolation", abi)
+	case !landlockEnabled:
+		logger.Debugf("landlock unix socket isolation is unavailable on %s", runtime.GOARCH)
+	}
+
+	if !landlockEnabled {
+		logger.Warnf("landlock unix socket isolation is unavailable, denying all unix and vsock socket creation")
+	} else {
+		logger.Debugf("installing landlock unix socket isolation")
+	}
+
+	// no_new_privs is per-thread until Landlock and seccomp synchronize the
+	// restriction, so the goroutine must not move between kernel threads.
+	runtime.LockOSThread()
+
+	defer runtime.UnlockOSThread()
 
 	err = seccomp.SetNoNewPrivs()
 	if err != nil {
 		return fmt.Errorf("restrict local sockets: set no_new_privs: %w", err)
+	}
+
+	if landlockEnabled {
+		err = restrictExternalUnixSockets()
+		if err != nil {
+			return fmt.Errorf("restrict local sockets: %w", err)
+		}
 	}
 
 	err = loadNativeArchitectureGuard()
@@ -36,7 +67,7 @@ func ExecRestricted(command []string, logger *logging.Logger) error {
 		return fmt.Errorf("restrict local sockets: %w", err)
 	}
 
-	err = seccomp.LoadFilter(restrictedSocketFilter())
+	err = seccomp.LoadFilter(restrictedSocketFilter(!landlockEnabled))
 	if err != nil {
 		return fmt.Errorf("restrict local sockets: %w", err)
 	}
@@ -51,7 +82,7 @@ func ExecRestricted(command []string, logger *logging.Logger) error {
 	return nil
 }
 
-func restrictedSocketFilter() seccomp.Filter {
+func restrictedSocketFilter(denyUnixSockets bool) seccomp.Filter {
 	blockedSyscalls := []string{
 		// io_uring can create sockets without invoking the socket syscall.
 		"io_uring_setup",
@@ -62,10 +93,15 @@ func restrictedSocketFilter() seccomp.Filter {
 		blockedSyscalls = append(blockedSyscalls, "socketcall")
 	}
 
-	restrictedSocketConditions := make([]seccomp.NameWithConditions, 0, 4)
+	restrictedFamilies := []uint64{unix.AF_VSOCK}
+	if denyUnixSockets {
+		restrictedFamilies = append(restrictedFamilies, unix.AF_UNIX)
+	}
+
+	restrictedSocketConditions := make([]seccomp.NameWithConditions, 0, len(restrictedFamilies)*2)
 
 	for _, syscallName := range []string{"socket", "socketpair"} {
-		for _, family := range []uint64{unix.AF_UNIX, unix.AF_VSOCK} {
+		for _, family := range restrictedFamilies {
 			restrictedSocketConditions = append(restrictedSocketConditions, seccomp.NameWithConditions{
 				Name: syscallName,
 				Conditions: seccomp.ArgumentConditions{
