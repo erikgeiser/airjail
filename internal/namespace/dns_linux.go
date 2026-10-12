@@ -121,3 +121,24 @@ func (forwarder *dnsUDPForwarder) forward(
 
 	return nil
 }
+
+func createDNSUDPSocket(
+	ctx context.Context,
+	listenConfig *net.ListenConfig,
+	network string,
+	address string,
+) (*net.UDPConn, error) {
+	packetConnection, err := listenConfig.ListenPacket(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+
+	udpConnection, ok := packetConnection.(*net.UDPConn)
+	if !ok {
+		_ = packetConnection.Close()
+
+		return nil, fmt.Errorf("listen on DNS UDP socket: unexpected type %T", packetConnection)
+	}
+
+	return udpConnection, nil
+}

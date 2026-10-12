@@ -259,6 +259,8 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 	packetServers := make([]dnsPacketServer, 0, 2)
 
 	listenConfig := net.ListenConfig{}
+	gatewayListenConfig := newTransparentListenConfig()
+
 	if options.HTTPSocket != "" {
 		listener, err := listenConfig.Listen(ctx, "tcp4", HTTPAddress)
 		if err != nil {
@@ -286,7 +288,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 	if options.TransparentTCP {
 		dnsServers, dnsPacketServers, setupErr := createDNSBridgeServers(
 			ctx,
-			&listenConfig,
+			&gatewayListenConfig,
 			options.DNSSocket,
 			options.Logger.WithPrefix("DNS bridge"),
 		)
@@ -301,7 +303,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 
 		transparentServers, setupErr := createTransparentTCPServers(
 			ctx,
-			&listenConfig,
+			&gatewayListenConfig,
 			options.SOCKSocket,
 			options.DNSSocket,
 			options.Logger.WithPrefix("transparent TCP to SOCKS bridge"),
@@ -525,7 +527,7 @@ func createDNSBridgeServers(
 		address    string
 	}{
 		{tcpNetwork: "tcp4", udpNetwork: "udp4", address: DNSIPv4Address},
-		{tcpNetwork: "tcp6", udpNetwork: "udp6", address: DNSIPv6Address},
+		{tcpNetwork: tcp6Network, udpNetwork: udp6Network, address: DNSIPv6Address},
 	} {
 		listener, err := listenConfig.Listen(ctx, endpoint.tcpNetwork, endpoint.address)
 		if err != nil {
@@ -539,7 +541,7 @@ func createDNSBridgeServers(
 
 		servers = append(servers, bridgeServer{listener: listener, server: newForwarder(socketPath)})
 
-		udpConnection, err := createDNSUDPSocket(ctx, endpoint.udpNetwork, endpoint.address)
+		udpConnection, err := createDNSUDPSocket(ctx, listenConfig, endpoint.udpNetwork, endpoint.address)
 		if err != nil {
 			closeBridgeListeners(servers)
 			closeDNSPacketServers(packetServers)
@@ -570,7 +572,7 @@ func createTransparentTCPServers(
 		address string
 	}{
 		{network: "tcp4", address: transparentTCPIPv4Address},
-		{network: "tcp6", address: transparentTCPIPv6Address},
+		{network: tcp6Network, address: transparentTCPIPv6Address},
 	} {
 		listener, err := listenConfig.Listen(ctx, endpoint.network, endpoint.address)
 		if err != nil {

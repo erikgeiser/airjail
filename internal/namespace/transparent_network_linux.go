@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"syscall"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
@@ -12,23 +13,46 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const transparentTableName = "airjail-transparent"
+const (
+	transparentTableName = "airjail-transparent"
+	tcp6Network          = "tcp6"
+	udp6Network          = "udp6"
+)
+
+func newTransparentListenConfig() net.ListenConfig {
+	return net.ListenConfig{
+		Control: func(network, _ string, connection syscall.RawConn) error {
+			if network != tcp6Network && network != udp6Network {
+				return nil
+			}
+
+			var socketErr error
+
+			err := connection.Control(func(fileDescriptor uintptr) {
+				socketErr = unix.SetsockoptInt(
+					int(fileDescriptor),
+					unix.IPPROTO_IPV6,
+					unix.IPV6_FREEBIND,
+					1,
+				)
+			})
+			if err != nil {
+				return fmt.Errorf("access transparent IPv6 listener socket: %w", err)
+			}
+
+			if socketErr != nil {
+				return fmt.Errorf("enable transparent IPv6 listener freebind: %w", socketErr)
+			}
+
+			return nil
+		},
+	}
+}
 
 func configureTransparentRoutes() error {
 	loopback, err := netlink.LinkByName("lo")
 	if err != nil {
 		return fmt.Errorf("find loopback for transparent routing: %w", err)
-	}
-
-	internalIPv6 := netip.MustParseAddr(internalIPv6Address)
-	internalIPv6Prefix := &net.IPNet{
-		IP:   net.IP(internalIPv6.AsSlice()),
-		Mask: net.CIDRMask(128, 128),
-	}
-
-	err = netlink.AddrReplace(loopback, &netlink.Addr{IPNet: internalIPv6Prefix})
-	if err != nil {
-		return fmt.Errorf("assign transparent IPv6 gateway to loopback: %w", err)
 	}
 
 	routes := []netlink.Route{

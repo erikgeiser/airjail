@@ -2,8 +2,10 @@ package namespace
 
 import (
 	"encoding/binary"
+	"net"
 	"net/netip"
 	"slices"
+	"syscall"
 	"testing"
 	"unsafe"
 
@@ -107,6 +109,75 @@ func TestTransparentDNSUDPDestinationNAT(t *testing.T) {
 		if isPayload && payload.OperationType == expr.PayloadWrite {
 			t.Fatalf("DNS destination NAT contains a payload-write expression: %#v", payload)
 		}
+	}
+}
+
+func TestTransparentListenConfigEnablesIPv6Freebind(t *testing.T) {
+	t.Parallel()
+
+	listenConfig := newTransparentListenConfig()
+
+	listener, err := listenConfig.Listen(
+		t.Context(),
+		tcp6Network,
+		net.JoinHostPort(internalIPv6Address, "0"),
+	)
+	if err != nil {
+		t.Fatalf("listen on unassigned transparent IPv6 address: %v", err)
+	}
+	defer func() { _ = listener.Close() }()
+
+	tcpListener, ok := listener.(*net.TCPListener)
+	if !ok {
+		t.Fatalf("listener type = %T, want *net.TCPListener", listener)
+	}
+
+	assertIPv6Freebind(t, tcpListener)
+
+	udpConnection, err := createDNSUDPSocket(
+		t.Context(),
+		&listenConfig,
+		udp6Network,
+		net.JoinHostPort(internalIPv6Address, "0"),
+	)
+	if err != nil {
+		t.Fatalf("listen for DNS on unassigned transparent IPv6 address: %v", err)
+	}
+	defer func() { _ = udpConnection.Close() }()
+
+	assertIPv6Freebind(t, udpConnection)
+}
+
+func assertIPv6Freebind(tb testing.TB, connection syscall.Conn) {
+	tb.Helper()
+
+	rawConnection, err := connection.SyscallConn()
+	if err != nil {
+		tb.Fatalf("access listener socket: %v", err)
+	}
+
+	var (
+		freebind  int
+		socketErr error
+	)
+
+	err = rawConnection.Control(func(fileDescriptor uintptr) {
+		freebind, socketErr = unix.GetsockoptInt(
+			int(fileDescriptor),
+			unix.IPPROTO_IPV6,
+			unix.IPV6_FREEBIND,
+		)
+	})
+	if err != nil {
+		tb.Fatalf("control listener socket: %v", err)
+	}
+
+	if socketErr != nil {
+		tb.Fatalf("read listener freebind setting: %v", socketErr)
+	}
+
+	if freebind != 1 {
+		tb.Errorf("IPV6_FREEBIND = %d, want 1", freebind)
 	}
 }
 
