@@ -406,7 +406,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			Directory:        options.Directory,
 			Sys:              childProcessAttributes,
 			ManageForeground: options.ManageForeground,
-			ReapProcessGroup: true,
+			ReapDescendants:  true,
 			Logger:           options.Logger,
 		})
 

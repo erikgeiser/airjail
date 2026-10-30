@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,7 +23,7 @@ type runOptions struct {
 	Sys                    *syscall.SysProcAttr
 	JoinParentProcessGroup bool
 	ManageForeground       bool
-	ReapProcessGroup       bool
+	ReapDescendants        bool
 	Logger                 *logging.Logger
 }
 
@@ -132,8 +134,8 @@ func runSandboxedProcess(ctx context.Context, command []string, options runOptio
 		case status.Exited():
 			childFinished = true
 
-			if options.ReapProcessGroup {
-				reapErr := terminateAndReapProcessGroup(pid)
+			if options.ReapDescendants {
+				reapErr := terminateAndReapDescendants(pid, options.Logger)
 				if reapErr != nil {
 					return 0, reapErr
 				}
@@ -143,8 +145,8 @@ func runSandboxedProcess(ctx context.Context, command []string, options runOptio
 		case status.Signaled():
 			childFinished = true
 
-			if options.ReapProcessGroup {
-				reapErr := terminateAndReapProcessGroup(pid)
+			if options.ReapDescendants {
+				reapErr := terminateAndReapDescendants(pid, options.Logger)
 				if reapErr != nil {
 					return 0, reapErr
 				}
@@ -182,28 +184,88 @@ func runSandboxedProcess(ctx context.Context, command []string, options runOptio
 	}
 }
 
-func terminateAndReapProcessGroup(processGroup int) error {
+func terminateAndReapDescendants(processGroup int, logger *logging.Logger) error {
 	killErr := unix.Kill(-processGroup, unix.SIGKILL)
 	if killErr != nil && !errors.Is(killErr, unix.ESRCH) {
-		return fmt.Errorf("kill rem aining processes in group %d: %w", processGroup, killErr)
+		return fmt.Errorf("kill remaining processes in group %d: %w", processGroup, killErr)
 	}
 
+	// Job control and setsid let descendants leave the command's process group.
+	// The subreaper adopts them as their parents exit. Repeat for each new
+	// generation of orphans until every descendant has been killed and reaped.
 	for {
-		var status unix.WaitStatus
-
-		_, err := unix.Wait4(-processGroup, &status, 0, nil)
-		if errors.Is(err, unix.EINTR) {
-			continue
+		children, err := childProcessIDs()
+		if err != nil {
+			return err
 		}
 
-		if errors.Is(err, unix.ECHILD) {
+		if len(children) == 0 {
 			return nil
 		}
 
-		if err != nil {
-			return fmt.Errorf("reap remaining processes in group %d: %w", processGroup, err)
+		for _, pid := range children {
+			err = unix.Kill(pid, unix.SIGKILL)
+			if err != nil && !errors.Is(err, unix.ESRCH) {
+				return fmt.Errorf("kill remaining child %d: %w", pid, err)
+			}
+		}
+
+		for _, pid := range children {
+			for {
+				var status unix.WaitStatus
+
+				_, err = unix.Wait4(pid, &status, 0, nil)
+				if errors.Is(err, unix.EINTR) {
+					continue
+				}
+
+				if err != nil && !errors.Is(err, unix.ECHILD) {
+					return fmt.Errorf("reap remaining child %d: %w", pid, err)
+				}
+
+				if err == nil {
+					if status.Signaled() {
+						logger.Debugf("reaped remaining child %d: signal %s", pid, status.Signal())
+					} else {
+						logger.Debugf("reaped remaining child %d: exit status %d", pid, status.ExitStatus())
+					}
+				}
+
+				break
+			}
 		}
 	}
+}
+
+func childProcessIDs() ([]int, error) {
+	tasks, err := os.ReadDir("/proc/self/task")
+	if err != nil {
+		return nil, fmt.Errorf("list supervisor threads: %w", err)
+	}
+
+	children := []int{}
+
+	for _, task := range tasks {
+		contents, err := os.ReadFile(filepath.Join("/proc/self/task", task.Name(), "children"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("read supervisor thread children: %w", err)
+		}
+
+		for field := range strings.FieldsSeq(string(contents)) {
+			pid, err := strconv.Atoi(field)
+			if err != nil || pid <= 0 {
+				return nil, fmt.Errorf("parse child process ID %q", field)
+			}
+
+			children = append(children, pid)
+		}
+	}
+
+	return children, nil
 }
 
 func cloneSysProcAttr(source *syscall.SysProcAttr) *syscall.SysProcAttr {
