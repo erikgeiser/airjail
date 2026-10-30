@@ -139,6 +139,7 @@ allow:
 block:
   - "bad.example.com"
   - "127.0.0.1:53"
+log: warning
 restrict_sockets: true
 allow_unresolved_rules: false
 allow_arbitrary_dns: false
@@ -147,6 +148,11 @@ connect_timeout: 5s
 transparent_fallback: false
 private_loopback: true
 ```
+
+Logging defaults to warnings. Use `--log traffic` to see allowed and blocked
+connections and lookups, `--log info` to add operational messages, `--log debug`
+to add detailed diagnostics, or use `--log silent` to disable logging
+altogether.
 
 Transparent TCP and filtered DNS are enabled by default for non-empty policies.
 Use `--disable-transparent-fallback` or `transparent_fallback: false` for
@@ -207,14 +213,23 @@ are lost. If `airjail` is invoked without any configuration, this is all it
 does. However, if rules are present, it creates a SOCKS and an HTTP/HTTPS proxy
 outside of the namespace that each listen on a Unix domain socket and only proxy
 allowed traffic. Inside the namespace, TCP listeners forward proxy-aware traffic
-to those sockets. Unless transparent fallback is disabled, nftables redirects
-other TCP connections to a transparent listener, which obtains the original
-destination and connects to it through the same policy-enforcing SOCKS server.
-Proxy environment variables continue to let proxy-aware programs provide
-destination hostnames directly. For non-proxy-aware programs, nftables redirects
-DNS over TCP and UDP to a filtered outer resolver. Approved A and AAAA responses
-temporarily associate their addresses with matching hostname rules before
-transparent TCP connections are permitted.
+to those sockets. The HTTP bridge listens on `127.97.105.114:19080` and the
+SOCKS bridge on `127.97.105.114:19081`; both use IPv4. `HTTP_PROXY`,
+`HTTPS_PROXY`, and `GRPC_PROXY` point to HTTP, while `ALL_PROXY` and `FTP_PROXY`
+use remote-resolving SOCKS. Lowercase equivalents are also set. Unless
+transparent fallback is disabled, nftables redirects other TCP connections to a
+transparent listener, which obtains the original destination and connects to it
+through the same policy-enforcing SOCKS server. Proxy environment variables
+continue to let proxy-aware programs provide destination hostnames directly. For
+non-proxy-aware programs, nftables redirects DNS over TCP and UDP to a filtered
+outer resolver. Approved A and AAAA responses temporarily associate their
+addresses with matching hostname rules before transparent TCP connections are
+permitted.
+
+The supervisor drops child capabilities and starts the child from the same
+locked OS thread, because Linux capability sets and `no_new_privs` are
+thread-local. That thread is retired when its goroutine exits rather than reused
+for other work.
 
 The opt-in feature to restrict local sockets loads `seccomp` `BPF` rules that
 are assembled in pure Go. These rules restrict access to the syscalls `socket`
