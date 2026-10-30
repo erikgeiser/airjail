@@ -197,10 +197,8 @@ func (router *ProxyAwareRouter) dialHTTPProxy(
 	}
 
 	if strings.EqualFold(proxyURL.Scheme, proxyHTTPScheme) {
-		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
-		if net.ParseIP(proxyHost) == nil {
-			tlsConfig.ServerName = proxyHost
-		}
+		// Go verifies IP SANs and omits IP literals from SNI automatically.
+		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: proxyHost}
 
 		tlsConnection := tls.Client(connection, tlsConfig)
 
