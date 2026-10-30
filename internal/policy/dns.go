@@ -116,8 +116,6 @@ func (policy *Policy) installResolutionGrants(
 			policy.dynamic.addAlias(alias, origin, expires)
 		}
 	}
-
-	policy.dynamic.enforceLimit()
 }
 
 func (policy *Policy) mayResolve(query string, origins []string) bool {

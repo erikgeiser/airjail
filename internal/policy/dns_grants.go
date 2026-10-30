@@ -6,8 +6,6 @@ import (
 	"time"
 )
 
-const maxDynamicDNSGrants = 8192
-
 type dynamicAddressKey struct {
 	ruleIndex int
 	address   netip.Addr
@@ -101,63 +99,4 @@ func (dynamic *dynamicPolicy) removeExpired(now time.Time) {
 			delete(dynamic.aliases, alias)
 		}
 	}
-}
-
-func (dynamic *dynamicPolicy) enforceLimit() {
-	for dynamic.count() > maxDynamicDNSGrants {
-		remove := dynamic.oldestGrantRemoval()
-		if remove == nil {
-			return
-		}
-
-		remove()
-	}
-}
-
-func (dynamic *dynamicPolicy) oldestGrantRemoval() func() {
-	var (
-		oldestExpiration time.Time
-		remove           func()
-	)
-
-	consider := func(expires time.Time, candidate func()) {
-		if remove == nil || expires.Before(oldestExpiration) {
-			oldestExpiration = expires
-			remove = candidate
-		}
-	}
-
-	for key, expires := range dynamic.allow {
-		consider(expires, func() { delete(dynamic.allow, key) })
-	}
-
-	for key, expires := range dynamic.block {
-		consider(expires, func() { delete(dynamic.block, key) })
-	}
-
-	for alias, origins := range dynamic.aliases {
-		for origin, expires := range origins {
-			alias := alias
-			origin := origin
-
-			consider(expires, func() {
-				delete(dynamic.aliases[alias], origin)
-
-				if len(dynamic.aliases[alias]) == 0 {
-					delete(dynamic.aliases, alias)
-				}
-			})
-		}
-	}
-
-	return remove
-}
-
-func (dynamic *dynamicPolicy) count() int {
-	count := len(dynamic.allow) + len(dynamic.block)
-	for _, origins := range dynamic.aliases {
-		count += len(origins)
-	}
-
-	return count
 }
