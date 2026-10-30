@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"runtime"
 	"syscall"
 
 	"github.com/erikgeiser/airjail/internal/cli"
@@ -212,8 +213,8 @@ type SupervisorOptions struct {
 	Logger                 *logging.Logger
 }
 
-// Namespace setup requires ordered cleanup for each partially initialized resource.
-func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) { //nolint:maintidx
+// RunSupervisor sets up the namespace and supervises the isolated command.
+func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) {
 	options.Logger = options.Logger.WithPrefix("supervisor")
 
 	for _, socketPath := range []string{options.HTTPSocket, options.SOCKSocket, options.DNSSocket} {
@@ -336,14 +337,6 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 		return 0, fmt.Errorf("set child subreaper: %w", err)
 	}
 
-	childProcessAttributes, err := prepareChildCapabilities(options)
-	if err != nil {
-		closeBridgeListeners(servers)
-		closeDNSPacketServers(packetServers)
-
-		return 0, err
-	}
-
 	group, groupCtx := errgroup.WithContext(ctx)
 	for _, server := range servers {
 		group.Go(func() error {
@@ -401,14 +394,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			}, command...)
 		}
 
-		childExitCode, childErr = runSandboxedProcess(groupCtx, command, runOptions{
-			Environment:      options.Environment,
-			Directory:        options.Directory,
-			Sys:              childProcessAttributes,
-			ManageForeground: options.ManageForeground,
-			ReapDescendants:  true,
-			Logger:           options.Logger,
-		})
+		childExitCode, childErr = runSupervisorChild(groupCtx, command, options)
 
 		return nil
 	})
@@ -423,6 +409,26 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 	}
 
 	return childExitCode, nil
+}
+
+func runSupervisorChild(ctx context.Context, command []string, options SupervisorOptions) (int, error) {
+	// Capabilities and no_new_privs are thread-local. Fork the child from the
+	// thread that drops them, and let Go retire it rather than reuse it.
+	runtime.LockOSThread()
+
+	childProcessAttributes, err := prepareChildCapabilities(options)
+	if err != nil {
+		return 0, err
+	}
+
+	return runSandboxedProcess(ctx, command, runOptions{
+		Environment:      options.Environment,
+		Directory:        options.Directory,
+		Sys:              childProcessAttributes,
+		ManageForeground: options.ManageForeground,
+		ReapDescendants:  true,
+		Logger:           options.Logger,
+	})
 }
 
 func validateProxySocket(path string) error {
