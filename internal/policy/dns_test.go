@@ -2,10 +2,14 @@
 package policy
 
 import (
+	"bytes"
 	"context"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/erikgeiser/airjail/internal/logging"
 )
 
 func TestResolutionPortSemantics(t *testing.T) {
@@ -166,7 +170,9 @@ func TestResolutionAuthorizationRejectsImplicitHostnames(t *testing.T) {
 		allowRules []string
 		blockRules []string
 	}{
-		{name: "block-only", blockRules: []string{"blocked.example"}},
+		{name: "address block-only", blockRules: []string{"192.0.2.1"}},
+		{name: "prefix block-only", blockRules: []string{"192.0.2.0/24"}},
+		{name: "mixed block-only", blockRules: []string{"blocked.example", "192.0.2.1"}},
 		{name: "address allow", allowRules: []string{"192.0.2.0/24"}},
 	}
 
@@ -228,6 +234,49 @@ func TestArbitraryDNSAllowsResolutionWithoutBypassingAddressPolicy(t *testing.T)
 
 	if allowed {
 		t.Fatal("arbitrary DNS bypassed address policy")
+	}
+}
+
+func TestBlocklistDNSRestrictionLog(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		allow     []string
+		block     []string
+		arbitrary bool
+		level     string
+		wantLog   bool
+	}{
+		{name: "address blocklist", block: []string{"192.0.2.1"}, level: "info", wantLog: true},
+		{name: "prefix blocklist", block: []string{"192.0.2.0/24"}, level: "info", wantLog: true},
+		{name: "hostname blocklist", block: []string{"*.example.com"}, level: "info"},
+		{name: "explicit override", block: []string{"192.0.2.1"}, arbitrary: true, level: "info"},
+		{name: "allowlist", allow: []string{"192.0.2.0/24"}, block: []string{"192.0.2.1"}, level: "info"},
+		{name: "quiet by default", block: []string{"192.0.2.1"}, level: "warning"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var output bytes.Buffer
+
+			logger, err := logging.New(&output, test.level, "")
+			if err != nil {
+				t.Fatalf("logging.New: %v", err)
+			}
+
+			_, err = New(t.Context(), test.allow, test.block, Options{
+				AllowArbitraryDNS: test.arbitrary,
+				Logger:            logger,
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+
+			if got := strings.Contains(output.String(), "--allow-arbitrary-dns"); got != test.wantLog {
+				t.Errorf("restriction log present = %t, want %t", got, test.wantLog)
+			}
+		})
 	}
 }
 

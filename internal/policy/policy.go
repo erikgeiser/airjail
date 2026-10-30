@@ -51,6 +51,15 @@ func New(ctx context.Context, allowRules, blockRules []string, options Options) 
 		return nil, fmt.Errorf("parse block policy: %w", err)
 	}
 
+	allowArbitraryDNS := options.AllowArbitraryDNS || allow.empty() && block.hostnameOnly()
+	if allow.empty() && !block.empty() && !allowArbitraryDNS {
+		options.Logger.Infof(
+			"blocklist contains IP/CIDR rules: " +
+				"hostname resolution was restricted to prevent DNS exfiltration, " +
+				"use --allow-arbitrary-dns to it",
+		)
+	}
+
 	resolver := options.Resolver
 	if resolver == nil {
 		resolver = net.DefaultResolver
@@ -73,7 +82,7 @@ func New(ctx context.Context, allowRules, blockRules []string, options Options) 
 	return &Policy{
 		allow:             allow,
 		block:             block,
-		allowArbitraryDNS: options.AllowArbitraryDNS,
+		allowArbitraryDNS: allowArbitraryDNS,
 		dynamic: dynamicPolicy{
 			allow:   make(map[dynamicAddressKey]time.Time),
 			block:   make(map[dynamicAddressKey]time.Time),

@@ -116,7 +116,12 @@ func TestRulesRequireResolver(t *testing.T) {
 		{name: "configured snapshot", allow: []string{"foo.bar@10.0.0.1"}},
 		{name: "exact hostname", allow: []string{"foo.bar"}, want: true},
 		{name: "allow wildcard", allow: []string{"*.foo.bar"}, want: true},
-		{name: "block wildcard only", block: []string{"*.foo.bar"}},
+		{name: "block wildcard only", block: []string{"*.foo.bar"}, want: true},
+		{name: "block snapshot only", block: []string{"foo.bar@10.0.0.1"}, want: true},
+		{name: "block address only", block: []string{"10.0.0.1"}},
+		{name: "block prefix only", block: []string{"10.0.0.0/8"}},
+		{name: "mixed blocklist", block: []string{"*.foo.bar", "10.0.0.1"}},
+		{name: "allowlist with hostname block", allow: []string{"10.0.0.0/8"}, block: []string{"*.foo.bar"}},
 		{name: "arbitrary DNS", block: []string{"10.0.0.1"}, allowArbitraryDNS: true, want: true},
 	}
 

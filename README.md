@@ -160,12 +160,14 @@ available to applications that explicitly use an airjail proxy and override the
 private-loopback `NO_PROXY` exclusion.
 
 By default, exact hostname rules and their CNAME aliases are answered from the
-startup snapshot without another upstream query. Only names matched by wildcard
-hostname allow rules, including authorized CNAME chains, may reach an upstream
-DNS resolver. IP/CIDR-only and block-only policies therefore do not resolve
-child-supplied hostnames. Use `--allow-arbitrary-dns` or `allow_arbitrary_dns:
-true` to allow DNS resolution when IP/CIDR block rules and no domain allow rules
-are present if the risk of DNS exfiltration is acceptable. Connection policy is
+startup snapshot without another upstream query. In allowlist mode, only names
+matched by hostname allow rules, including authorized CNAME chains, may reach an
+upstream DNS resolver. Hostname-only blocklists permit DNS except for names
+blocked on all ports. Blocklists containing explicit IP/CIDR rules and
+IP/CIDR-only allowlists do not authorize arbitrary child-supplied hostnames.
+In blocklist mode, an info-level log explains this restriction. Use
+`--allow-arbitrary-dns` or `allow_arbitrary_dns: true` to permit arbitrary DNS
+resolution if the risk of DNS exfiltration is acceptable. Connection policy is
 still enforced on every answer, but query names can carry data to an
 authoritative DNS server.
 

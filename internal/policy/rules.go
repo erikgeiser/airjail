@@ -80,7 +80,7 @@ func RulesRequireResolver(allowRules, blockRules []string, allowArbitraryDNS boo
 		return false, fmt.Errorf("parse block policy: %w", err)
 	}
 
-	if allowArbitraryDNS && (!allow.empty() || !block.empty()) {
+	if allowArbitraryDNS && (!allow.empty() || !block.empty()) || allow.empty() && block.hostnameOnly() {
 		return true, nil
 	}
 
@@ -97,6 +97,10 @@ func RulesRequireResolver(allowRules, blockRules []string, allowArbitraryDNS boo
 	}
 
 	return false, nil
+}
+
+func (rules *ruleSet) hostnameOnly() bool {
+	return len(rules.hosts) != 0 && len(rules.addresses) == 0 && len(rules.prefixes) == 0
 }
 
 func parseRules(rawRules []string, logger *logging.Logger) (ruleSet, error) {

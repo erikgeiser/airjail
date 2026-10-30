@@ -296,7 +296,7 @@ func TestDNSBlockOnlyPolicyRejectsQueryBeforeUpstream(t *testing.T) {
 	t.Parallel()
 
 	called := false
-	server, _ := newTestServer(t, nil, []string{"blocked.example"}, func(request *dns.Msg) *dns.Msg {
+	server, _ := newTestServer(t, nil, []string{"192.0.2.0/24"}, func(request *dns.Msg) *dns.Msg {
 		called = true
 
 		response := new(dns.Msg)
@@ -312,6 +312,50 @@ func TestDNSBlockOnlyPolicyRejectsQueryBeforeUpstream(t *testing.T) {
 
 	if called {
 		t.Fatal("block-only query reached upstream resolver")
+	}
+}
+
+func TestDNSHostnameOnlyBlocklist(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		hostname  string
+		wantCode  int
+		wantQuery bool
+	}{
+		{name: "unrelated name", hostname: "other.example.", wantCode: dns.RcodeSuccess, wantQuery: true},
+		{name: "exact blocked name", hostname: "blocked.example.", wantCode: dns.RcodeRefused},
+		{name: "blocked subdomain", hostname: "sub.blocked.example.", wantCode: dns.RcodeRefused},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			called := false
+			server, networkPolicy := newTestServer(t, nil,
+				[]string{"blocked.example@192.0.2.10", "*.blocked.example"},
+				func(request *dns.Msg) *dns.Msg {
+					called = true
+					response := new(dns.Msg)
+					response.SetReply(request)
+					response.Answer = []dns.RR{&dns.A{
+						Hdr: dns.RR_Header{Name: request.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+						A:   []byte{192, 0, 2, 10},
+					}}
+
+					return response
+				})
+
+			response := exchangeTestQuery(t, server, test.hostname, dns.TypeA)
+			if response.Rcode != test.wantCode || called != test.wantQuery {
+				t.Fatalf("response = %s, upstream called = %t", dns.RcodeToString[response.Rcode], called)
+			}
+
+			allowed, err := networkPolicy.Allows("other.example", netip.MustParseAddr("192.0.2.10"), 443)
+			if err != nil || allowed {
+				t.Fatalf("blocked snapshot address allowed = %t, error = %v", allowed, err)
+			}
+		})
 	}
 }
 
