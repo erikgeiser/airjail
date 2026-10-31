@@ -94,6 +94,18 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 	// while foreground wrappers such as `go run` legitimately share a job group.
 	terminal, foregroundProcessGroup := terminalForeground()
 
+	transparentIPv6 := false
+	if options.TransparentTCP {
+		transparentIPv6, err = detectTransparentIPv6()
+		if err != nil {
+			return 0, err
+		}
+
+		if !transparentIPv6 {
+			options.Logger.Infof("IPv6 transparent networking disabled because no IPv6 egress route was detected")
+		}
+	}
+
 	invocation := cli.SupervisorInvocation{
 		Command:                options.Command,
 		HTTPSocket:             options.HTTPSocket,
@@ -105,6 +117,7 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 		ManageForeground:       ownsTerminalForeground(terminal, foregroundProcessGroup, unix.Getpgrp()),
 		KeepUnsafeCapabilities: keptCapabilities,
 		TransparentTCP:         options.TransparentTCP,
+		TransparentIPv6:        transparentIPv6,
 		PrivateLoopback:        options.PrivateLoopback,
 	}
 
@@ -189,6 +202,7 @@ type SupervisorOptions struct {
 	ManageForeground       bool
 	KeepUnsafeCapabilities []string
 	TransparentTCP         bool
+	TransparentIPv6        bool
 	PrivateLoopback        bool
 	Logger                 *logging.Logger
 }
@@ -222,7 +236,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			return 0, fmt.Errorf("transparent TCP requires an outer DNS socket")
 		}
 
-		err = configureTransparentRoutes()
+		err = configureTransparentRoutes(options.TransparentIPv6)
 		if err != nil {
 			return 0, err
 		}
@@ -271,6 +285,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			ctx,
 			&gatewayListenConfig,
 			options.DNSSocket,
+			options.TransparentIPv6,
 			options.Logger.WithPrefix("DNS bridge"),
 		)
 		if setupErr != nil {
@@ -287,6 +302,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 			&gatewayListenConfig,
 			options.SOCKSocket,
 			options.DNSSocket,
+			options.TransparentIPv6,
 			options.Logger.WithPrefix("transparent TCP to SOCKS bridge"),
 		)
 		if setupErr != nil {
@@ -298,7 +314,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 
 		servers = append(servers, transparentServers...)
 
-		err = installTransparentRules(options.PrivateLoopback)
+		err = installTransparentRules(options.PrivateLoopback, options.TransparentIPv6)
 		if err != nil {
 			closeBridgeListeners(servers)
 			closeDNSPacketServers(packetServers)
@@ -505,6 +521,7 @@ func createDNSBridgeServers(
 	ctx context.Context,
 	listenConfig *net.ListenConfig,
 	socketPath string,
+	ipv6 bool,
 	logger *logging.Logger,
 ) ([]bridgeServer, []dnsPacketServer, error) {
 	servers := make([]bridgeServer, 0, 2)
@@ -518,6 +535,10 @@ func createDNSBridgeServers(
 		{tcpNetwork: "tcp4", udpNetwork: "udp4", address: DNSIPv4Address},
 		{tcpNetwork: tcp6Network, udpNetwork: udp6Network, address: DNSIPv6Address},
 	} {
+		if endpoint.tcpNetwork == tcp6Network && !ipv6 {
+			continue
+		}
+
 		listener, err := listenConfig.Listen(ctx, endpoint.tcpNetwork, endpoint.address)
 		if err != nil {
 			closeBridgeListeners(servers)
@@ -552,6 +573,7 @@ func createTransparentTCPServers(
 	listenConfig *net.ListenConfig,
 	socketPath string,
 	dnsSocketPath string,
+	ipv6 bool,
 	logger *logging.Logger,
 ) ([]bridgeServer, error) {
 	servers := make([]bridgeServer, 0, 2)
@@ -563,6 +585,10 @@ func createTransparentTCPServers(
 		{network: "tcp4", address: transparentTCPIPv4Address},
 		{network: tcp6Network, address: transparentTCPIPv6Address},
 	} {
+		if endpoint.network == tcp6Network && !ipv6 {
+			continue
+		}
+
 		listener, err := listenConfig.Listen(ctx, endpoint.network, endpoint.address)
 		if err != nil {
 			closeBridgeListeners(servers)

@@ -30,6 +30,7 @@ type SupervisorInvocation struct {
 	ManageForeground       bool     `json:"manage_foreground"`
 	KeepUnsafeCapabilities []string `json:"keep_unsafe_capabilities"`
 	TransparentTCP         bool     `json:"transparent_tcp"`
+	TransparentIPv6        bool     `json:"transparent_ipv6"`
 	PrivateLoopback        bool     `json:"private_loopback"`
 }
 

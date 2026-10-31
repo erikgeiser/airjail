@@ -49,7 +49,61 @@ func newTransparentListenConfig() net.ListenConfig {
 	}
 }
 
-func configureTransparentRoutes() error {
+// Inspect configured routes, not connectivity. Only the main table is considered;
+// routes in other tables may be unused or selected by destination-specific rules.
+func detectTransparentIPv6() (bool, error) {
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V6,
+		&netlink.Route{Table: unix.RT_TABLE_MAIN}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return false, fmt.Errorf("list outer IPv6 routes in main routing table: %w", err)
+	}
+
+	return hasIPv6EgressRoute(routes), nil
+}
+
+func hasIPv6EgressRoute(routes []netlink.Route) bool {
+	for _, route := range routes {
+		if route.Type != unix.RTN_UNICAST {
+			continue
+		}
+
+		// Netlink commonly represents a default route without a destination.
+		if route.Dst == nil {
+			return true
+		}
+
+		address, ok := netip.AddrFromSlice(route.Dst.IP)
+
+		bits, size := route.Dst.Mask.Size()
+		if !ok || !address.Is6() || address.Is4In6() || size != 128 {
+			continue
+		}
+
+		prefix := netip.PrefixFrom(address, bits).Masked()
+		localOnly := false
+
+		for _, excluded := range []netip.Prefix{
+			netip.MustParsePrefix("::/128"),
+			netip.MustParsePrefix("::1/128"),
+			netip.MustParsePrefix("fe80::/10"),
+			netip.MustParsePrefix("ff00::/8"),
+		} {
+			if prefix.Bits() >= excluded.Bits() && excluded.Contains(prefix.Addr()) {
+				localOnly = true
+
+				break
+			}
+		}
+
+		if !localOnly {
+			return true
+		}
+	}
+
+	return false
+}
+
+func configureTransparentRoutes(ipv6 bool) error {
 	loopback, err := netlink.LinkByName("lo")
 	if err != nil {
 		return fmt.Errorf("find loopback for transparent routing: %w", err)
@@ -62,12 +116,14 @@ func configureTransparentRoutes() error {
 			Scope:     netlink.SCOPE_HOST,
 			Type:      unix.RTN_LOCAL,
 		},
-		{
+	}
+	if ipv6 {
+		routes = append(routes, netlink.Route{
 			LinkIndex: loopback.Attrs().Index,
 			Dst:       &net.IPNet{IP: net.IPv6zero, Mask: net.CIDRMask(0, 128)},
 			Scope:     netlink.SCOPE_HOST,
 			Type:      unix.RTN_LOCAL,
-		},
+		})
 	}
 
 	for _, route := range routes {
@@ -80,7 +136,7 @@ func configureTransparentRoutes() error {
 	return nil
 }
 
-func installTransparentRules(privateLoopback bool) error {
+func installTransparentRules(privateLoopback, ipv6 bool) error {
 	connection, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("open nftables connection: %w", err)
@@ -105,15 +161,18 @@ func installTransparentRules(privateLoopback bool) error {
 		[]uint16{19080, 19081, transparentTCPPort, dnsPort},
 		ipv4ExemptPrefix,
 	)
-	addTransparentTable(
-		connection,
-		nftables.TableFamilyIPv6,
-		netip.MustParseAddr(internalIPv6Address),
-		unix.NFPROTO_IPV6,
-		24,
-		[]uint16{transparentTCPPort, dnsPort},
-		ipv6ExemptPrefix,
-	)
+
+	if ipv6 {
+		addTransparentTable(
+			connection,
+			nftables.TableFamilyIPv6,
+			netip.MustParseAddr(internalIPv6Address),
+			unix.NFPROTO_IPV6,
+			24,
+			[]uint16{transparentTCPPort, dnsPort},
+			ipv6ExemptPrefix,
+		)
+	}
 
 	err = connection.Flush()
 	if err != nil {

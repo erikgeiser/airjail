@@ -18,11 +18,12 @@ func TestSupervisorJSONSettingsAndNativeArgv(t *testing.T) {
 	wire := `{"http_socket":"/run/session space/http.sock","socks_socket":"/run/socks.sock",
 		"dns_socket":"/run/dns.sock","log_level":"debug","preserve_permissions":true,
 		"restrict_unix_sockets":true,"manage_foreground":true,"keep_unsafe_capabilities":["CAP_NET_ADMIN"],
-		"transparent_tcp":true,"private_loopback":true}`
+		"transparent_tcp":true,"transparent_ipv6":true,"private_loopback":true}`
 	want := SupervisorInvocation{
 		Command: command, HTTPSocket: "/run/session space/http.sock", SOCKSocket: "/run/socks.sock",
 		DNSSocket: "/run/dns.sock", LogLevel: "debug", PreservePermissions: true, RestrictUnixSockets: true,
-		ManageForeground: true, KeepUnsafeCapabilities: []string{"CAP_NET_ADMIN"}, TransparentTCP: true, PrivateLoopback: true,
+		ManageForeground: true, KeepUnsafeCapabilities: []string{"CAP_NET_ADMIN"},
+		TransparentTCP: true, TransparentIPv6: true, PrivateLoopback: true,
 	}
 
 	decoded, err := DecodeSupervisor(append([]string{wire}, command...))
