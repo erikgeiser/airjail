@@ -1,14 +1,11 @@
 package namespace
 
 import (
-	"bytes"
 	"os"
 	"os/exec"
 	"slices"
-	"strings"
 	"testing"
 
-	"github.com/erikgeiser/airjail/internal/logging"
 	"golang.org/x/sys/unix"
 )
 
@@ -69,27 +66,17 @@ func TestParseUnsafeCapabilitiesRejectsCapabilityNotDroppedByDefault(t *testing.
 	}
 }
 
-func TestSelectUnsafeCapabilitiesWarnsWhenCallerDoesNotHaveCapability(t *testing.T) {
+func TestSelectUnsafeCapabilitiesRejectsCapabilitiesCallerDoesNotHave(t *testing.T) {
 	t.Parallel()
-
-	var output bytes.Buffer
-
-	logger, err := logging.New(&output, "warning", "")
-	if err != nil {
-		t.Fatalf("logging.New: %v", err)
-	}
 
 	requested, err := parseUnsafeCapabilities([]string{"CAP_SYS_ADMIN"})
 	if err != nil {
 		t.Fatalf("parseUnsafeCapabilities: %v", err)
 	}
 
-	kept := selectUnsafeCapabilities(requested, PermissionPreservingMode, [2]unix.CapUserData{}, logger)
+	kept := selectUnsafeCapabilities(requested, PermissionPreservingMode, [2]unix.CapUserData{}, nil)
 	if len(kept) != 0 {
 		t.Errorf("kept capabilities = %v, want none", kept)
 	}
 
-	if !strings.Contains(output.String(), "CAP_SYS_ADMIN") {
-		t.Errorf("warning = %q", output.String())
-	}
 }

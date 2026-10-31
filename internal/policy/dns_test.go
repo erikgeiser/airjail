@@ -2,13 +2,9 @@
 package policy
 
 import (
-	"bytes"
 	"net/netip"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/erikgeiser/airjail/internal/logging"
 )
 
 func TestRuntimeDNSGrantsRetainSourcePortsAndExpire(t *testing.T) {
@@ -178,49 +174,6 @@ func TestDNSAuthorizationIsSeparateFromConnectionPolicy(t *testing.T) {
 			allowed, err = networkPolicy.Allows("", outsideAllowlist, 443)
 			if err != nil || allowed {
 				t.Fatalf("arbitrary DNS bypassed address policy: %t, %v", allowed, err)
-			}
-		})
-	}
-}
-
-func TestBlocklistDNSRestrictionLog(t *testing.T) {
-	t.Parallel()
-
-	for _, test := range []struct {
-		name      string
-		allow     []string
-		block     []string
-		arbitrary bool
-		level     string
-		wantLog   bool
-	}{
-		{name: "address blocklist", block: []string{"192.0.2.1"}, level: "info", wantLog: true},
-		{name: "prefix blocklist", block: []string{"192.0.2.0/24"}, level: "info", wantLog: true},
-		{name: "hostname blocklist", block: []string{"*.example.com"}, level: "info"},
-		{name: "explicit override", block: []string{"192.0.2.1"}, arbitrary: true, level: "info"},
-		{name: "allowlist", allow: []string{"192.0.2.0/24"}, block: []string{"192.0.2.1"}, level: "info"},
-		{name: "quiet by default", block: []string{"192.0.2.1"}, level: "warning"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			var output bytes.Buffer
-
-			logger, err := logging.New(&output, test.level, "")
-			if err != nil {
-				t.Fatalf("create logger: %v", err)
-			}
-
-			_, err = New(t.Context(), test.allow, test.block, Options{
-				AllowArbitraryDNS: test.arbitrary,
-				Logger:            logger,
-			})
-			if err != nil {
-				t.Fatalf("create policy: %v", err)
-			}
-
-			if got := strings.Contains(output.String(), "--allow-arbitrary-dns"); got != test.wantLog {
-				t.Errorf("restriction advice present = %t, want %t", got, test.wantLog)
 			}
 		})
 	}

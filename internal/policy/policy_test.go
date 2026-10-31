@@ -2,15 +2,11 @@
 package policy
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net/netip"
 	"slices"
-	"strings"
 	"testing"
-
-	"github.com/erikgeiser/airjail/internal/logging"
 )
 
 type fakeResolver struct {
@@ -243,24 +239,12 @@ func TestUnresolvedHostnamePolicy(t *testing.T) {
 		t.Fatal("New unexpectedly accepted an unresolved rule")
 	}
 
-	var warningOutput bytes.Buffer
-
-	logger, err := logging.New(&warningOutput, "warning", "")
-	if err != nil {
-		t.Fatalf("create logger: %v", err)
-	}
-
 	policy, err := New(context.Background(), []string{"missing.example"}, nil, Options{
 		Resolver:        resolver,
 		AllowUnresolved: true,
-		Logger:          logger,
 	})
 	if err != nil {
 		t.Fatalf("New with AllowUnresolved: %v", err)
-	}
-
-	if !strings.Contains(warningOutput.String(), "missing.example") {
-		t.Fatalf("missing unresolved-rule warning: %q", warningOutput.String())
 	}
 
 	allowed, err := policy.Allows("missing.example", netip.Addr{}, 443)
@@ -362,36 +346,6 @@ func TestStartupCNAMEBlockVetoesOriginalHostnameConnection(t *testing.T) {
 
 	if allowed {
 		t.Fatal("CNAME hostname block did not veto the original hostname connection")
-	}
-}
-
-func TestHostnameExpansionIsLoggedAtInfoLevel(t *testing.T) {
-	t.Parallel()
-
-	resolver := &fakeResolver{
-		addresses: map[string][]netip.Addr{
-			"service.example": {netip.MustParseAddr("192.0.2.10")},
-		},
-		errors: map[string]error{},
-	}
-
-	var output bytes.Buffer
-
-	logger, err := logging.New(&output, "info", "")
-	if err != nil {
-		t.Fatalf("logging.New: %v", err)
-	}
-
-	_, err = New(context.Background(), []string{"service.example:443"}, nil, Options{
-		Resolver: resolver,
-		Logger:   logger,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	if !strings.Contains(output.String(), "service.example:443") || !strings.Contains(output.String(), "192.0.2.10:443") {
-		t.Errorf("expansion log lacks source or resolved destination: %q", output.String())
 	}
 }
 

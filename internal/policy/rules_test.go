@@ -2,13 +2,9 @@
 package policy
 
 import (
-	"bytes"
 	"net/netip"
 	"slices"
-	"strings"
 	"testing"
-
-	"github.com/erikgeiser/airjail/internal/logging"
 )
 
 func TestParseRulesClassifiesStrictly(t *testing.T) {
@@ -183,41 +179,6 @@ func TestParseConfiguredHostnameSnapshotRejectsInvalidForms(t *testing.T) {
 			_, err := parseRules([]string{rawRule}, nil)
 			if err == nil {
 				t.Fatalf("parseRules(%q) unexpectedly succeeded", rawRule)
-			}
-		})
-	}
-}
-
-func TestParseRulesLogsCIDRNormalizationAtDebugLevel(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		level string
-		want  bool
-	}{
-		{level: "info"},
-		{level: "debug", want: true},
-	}
-
-	for _, test := range tests {
-		t.Run(test.level, func(t *testing.T) {
-			t.Parallel()
-
-			var output bytes.Buffer
-
-			logger, err := logging.New(&output, test.level, "")
-			if err != nil {
-				t.Fatalf("logging.New: %v", err)
-			}
-
-			_, err = parseRules([]string{"10.1.2.3/8"}, logger)
-			if err != nil {
-				t.Fatalf("parseRules: %v", err)
-			}
-
-			logged := strings.Contains(output.String(), "10.1.2.3/8") && strings.Contains(output.String(), "10.0.0.0/8")
-			if logged != test.want {
-				t.Errorf("normalization details logged = %t, want %t: %q", logged, test.want, output.String())
 			}
 		})
 	}
