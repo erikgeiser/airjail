@@ -84,19 +84,31 @@ func TestLoadAppliesDefaults(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	if !loaded.TransparentFallback {
-		t.Error("TransparentFallback = false, want default true")
+	if !loaded.TransparentFallback || loaded.ConnectTimeout != DefaultConnectTimeout {
+		t.Errorf("missing default configuration: %#v", loaded)
 	}
 }
 
-func TestLoadRejectsUnknownFields(t *testing.T) {
+func TestLoadRejectsAmbiguousOrInvalidConfig(t *testing.T) {
 	t.Parallel()
 
-	path := writeConfig(t, "unknown: true\n")
+	for _, test := range []struct {
+		name string
+		yaml string
+	}{
+		{name: "unknown field", yaml: "unknown: true\n"},
+		{name: "multiple documents", yaml: "allow: [first.test]\n---\nallow: [second.test]\n"},
+		{name: "duplicate key", yaml: "allow: [first.test]\nallow: [second.test]\n"},
+		{name: "malformed YAML", yaml: "allow: [unterminated\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("Load unexpectedly accepted an unknown field")
+			_, err := Load(writeConfig(t, test.yaml))
+			if err == nil {
+				t.Fatal("invalid configuration was accepted")
+			}
+		})
 	}
 }
 

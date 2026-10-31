@@ -1,6 +1,6 @@
 module github.com/erikgeiser/airjail
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/elastic/go-seccomp-bpf v1.6.0

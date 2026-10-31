@@ -2,12 +2,14 @@ package stream
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"testing"
 	"time"
 )
 
-func TestConnGroupClosesConnectionsAndWaits(t *testing.T) {
+func TestConnGroupWaitsForHandlerCleanup(t *testing.T) {
 	t.Parallel()
 
 	group := NewConnGroup()
@@ -15,25 +17,59 @@ func TestConnGroupClosesConnectionsAndWaits(t *testing.T) {
 	left, right := net.Pipe()
 	defer func() { _ = right.Close() }()
 
+	release := make(chan struct{})
+	readDone := make(chan error, 1)
 	handlerDone := make(chan struct{})
 
 	started := group.Go(func(_ *ConnScope) {
 		defer close(handlerDone)
 
 		buffer := make([]byte, 1)
-		_, _ = left.Read(buffer)
+
+		_, err := left.Read(buffer)
+		readDone <- err
+
+		<-release
 	}, left)
 	if !started {
-		t.Fatal("Go rejected an operation before shutdown")
+		t.Fatal("handler was rejected before shutdown")
 	}
 
 	group.Close()
-	group.Wait()
 
 	select {
-	case <-handlerDone:
+	case err := <-readDone:
+		if !errors.Is(err, io.ErrClosedPipe) {
+			t.Errorf("handler read error = %v, want closed connection", err)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("handler did not stop after connection closure")
+		_ = left.Close()
+
+		<-readDone
+		t.Error("Close did not unblock the handler")
+	}
+
+	waitDone := make(chan struct{})
+
+	go func() {
+		group.Wait()
+		close(waitDone)
+	}()
+
+	// The socket has closed, but the handler deliberately still owns cleanup.
+	select {
+	case <-waitDone:
+		t.Error("Wait returned before handler cleanup finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	<-handlerDone
+
+	select {
+	case <-waitDone:
+	case <-time.After(time.Second):
+		t.Fatal("Wait did not return after handler cleanup")
 	}
 
 	if group.Go(func(*ConnScope) {}, right) {
@@ -41,13 +77,16 @@ func TestConnGroupClosesConnectionsAndWaits(t *testing.T) {
 	}
 }
 
-func TestConnGroupShutdownOnContext(t *testing.T) {
+func TestConnGroupCancellationClosesConnections(t *testing.T) {
 	t.Parallel()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
 	group := NewConnGroup()
 
 	left, right := net.Pipe()
+	defer func() { _ = left.Close() }()
 	defer func() { _ = right.Close() }()
 
 	scope, ok := group.Acquire(left)
@@ -56,47 +95,34 @@ func TestConnGroupShutdownOnContext(t *testing.T) {
 	}
 	defer scope.Done()
 
+	readDone := make(chan error, 1)
+	go func() {
+		buffer := make([]byte, 1)
+
+		_, err := left.Read(buffer)
+		readDone <- err
+	}()
+
 	stopShutdown := group.ShutdownOnContext(ctx)
+	defer stopShutdown()
 
 	cancel()
 
-	err := left.SetReadDeadline(time.Now().Add(time.Second))
-	if err != nil {
-		t.Fatalf("set read deadline: %v", err)
-	}
+	select {
+	case err := <-readDone:
+		if !errors.Is(err, io.ErrClosedPipe) {
+			t.Errorf("read after cancellation = %v, want closed connection", err)
+		}
+	case <-time.After(time.Second):
+		_ = left.Close()
 
-	buffer := make([]byte, 1)
-	_, err = left.Read(buffer)
+		<-readDone
+		t.Error("cancellation did not close the connection")
+	}
 
 	stopShutdown()
 
-	if err == nil {
-		t.Fatal("tracked connection remained open after cancellation")
-	}
-
-	if group.Go(func(*ConnScope) {}) {
-		t.Fatal("Go accepted an operation after cancellation")
-	}
-}
-
-func TestConnScopeRejectsConnectionDuringShutdown(t *testing.T) {
-	t.Parallel()
-
-	group := NewConnGroup()
-
-	scope, ok := group.Acquire()
-	if !ok {
-		t.Fatal("Acquire rejected an operation before shutdown")
-	}
-	defer scope.Done()
-
-	group.Close()
-
-	left, right := net.Pipe()
-	defer func() { _ = left.Close() }()
-	defer func() { _ = right.Close() }()
-
-	if scope.Add(left) {
-		t.Fatal("Add accepted a connection during shutdown")
+	if scope.Add(right) || group.Go(func(*ConnScope) {}) {
+		t.Fatal("accepted new work after cancellation")
 	}
 }

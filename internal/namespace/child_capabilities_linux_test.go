@@ -1,187 +1,160 @@
+//nolint:goconst // Subprocess mode names remain visible at each boundary.
 package namespace
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
 )
 
-const (
-	childCapabilitiesTestStage = "AIRJAIL_CHILD_CAPABILITIES_TEST_STAGE"
-	childCapabilitiesRootless  = "rootless"
-)
+const childCapabilitiesMode = "AIRJAIL_CHILD_CAPABILITIES_MODE"
+
+// Keep the expected security boundary independent of the production drop list.
+const dangerousCapabilityMask = uint64(1)<<unix.CAP_SYS_ADMIN | uint64(1)<<unix.CAP_NET_ADMIN |
+	uint64(1)<<unix.CAP_SYS_PTRACE | uint64(1)<<unix.CAP_SYS_MODULE | uint64(1)<<unix.CAP_SYS_RAWIO |
+	uint64(1)<<unix.CAP_BPF | uint64(1)<<unix.CAP_PERFMON | uint64(1)<<unix.CAP_CHECKPOINT_RESTORE
 
 func TestSupervisorChildCapabilities(t *testing.T) {
 	t.Parallel()
 
-	for _, mode := range []string{childCapabilitiesRootless, "preserve", "keep"} {
+	if mode := os.Getenv(childCapabilitiesMode); mode != "" {
+		options := SupervisorOptions{Environment: os.Environ(), PreservePermissions: mode != "rootless"}
+		if mode == "keep" {
+			options.KeepUnsafeCapabilities = []string{os.Getenv("AIRJAIL_CHILD_KEEP")}
+		}
+
+		result := make(chan error, 1)
+
+		go func() {
+			exitCode, err := runSupervisorChild(t.Context(),
+				[]string{os.Args[0], "-test.run=^TestExecutedChildCapabilities$"}, options)
+			if exitCode != 0 {
+				t.Errorf("executed child exit status = %d", exitCode)
+			}
+
+			result <- err
+		}()
+
+		err := <-result
+		if err != nil {
+			t.Fatalf("run supervisor child: %v", err)
+		}
+
+		return
+	}
+
+	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+
+	data := [2]unix.CapUserData{}
+
+	err := unix.Capget(&header, &data[0])
+	if err != nil {
+		t.Fatalf("read test capabilities: %v", err)
+	}
+
+	if !capabilityEffective(data, unix.CAP_SETPCAP) {
+		t.Skip("capability bounding-set tests require CAP_SETPCAP")
+	}
+
+	noNewPrivileges, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
+	if err != nil {
+		t.Fatalf("read no_new_privs: %v", err)
+	}
+
+	keptName := ""
+	keptMask := uint64(0)
+
+	for _, capability := range dangerousCapabilities {
+		if capabilityPermitted(data, capability.value) {
+			keptName = capability.name
+			keptMask = uint64(1) << uint(capability.value)
+
+			break
+		}
+	}
+
+	for _, mode := range []string{"rootless", "preserve", "keep"} {
 		t.Run(mode, func(t *testing.T) {
 			t.Parallel()
 
-			command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestSupervisorChildCapabilitiesProcess$")
+			if mode != "rootless" && keptName == "" {
+				t.Skip("no dangerous capability is present to exercise dropping or preserving")
+			}
 
-			command.Env = append(os.Environ(),
-				childCapabilitiesTestStage+"=launch",
-				"AIRJAIL_CHILD_CAPABILITIES_TEST_MODE="+mode,
-			)
+			wantKept, wantNNP := uint64(0), noNewPrivileges
+			if mode == "keep" {
+				wantKept = keptMask
+			}
+
+			if mode == "rootless" {
+				wantNNP = 1
+			}
+
+			command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestSupervisorChildCapabilities$")
+
+			command.Env = append(os.Environ(), childCapabilitiesMode+"="+mode,
+				"AIRJAIL_CHILD_KEEP="+keptName, "AIRJAIL_CHILD_MASK="+strconv.FormatUint(wantKept, 16),
+				"AIRJAIL_CHILD_NNP="+strconv.Itoa(wantNNP))
 
 			output, err := command.CombinedOutput()
 			if err != nil {
-				t.Fatalf("child capability subprocess: %v\n%s", err, output)
+				t.Fatalf("capability subprocess: %v\n%s", err, output)
 			}
 		})
 	}
 }
 
-func TestSupervisorChildCapabilitiesProcess(t *testing.T) {
-	switch os.Getenv(childCapabilitiesTestStage) {
-	case "":
+func TestExecutedChildCapabilities(t *testing.T) {
+	mode := os.Getenv(childCapabilitiesMode)
+	if mode == "" {
 		return
-	case "launch":
-		launchCapabilityTestChild(t)
-	case "check":
-		checkExecutedChildCapabilities(t)
-	default:
-		t.Fatal("unexpected child capability test stage")
 	}
-}
 
-func launchCapabilityTestChild(tb testing.TB) {
-	tb.Helper()
-
-	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
-	data := [2]unix.CapUserData{}
-
-	err := unix.Capget(&header, &data[0])
+	status, err := os.ReadFile("/proc/self/status")
 	if err != nil {
-		tb.Fatalf("read initial capabilities: %v", err)
+		t.Fatalf("read executed child status: %v", err)
 	}
 
-	if !capabilityEffective(data, unix.CAP_SETPCAP) {
-		tb.Skip("dropping capability bounding sets requires CAP_SETPCAP")
-	}
-
-	noNewPrivileges, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
+	want, err := strconv.ParseUint(os.Getenv("AIRJAIL_CHILD_MASK"), 16, 64)
 	if err != nil {
-		tb.Fatalf("read initial no_new_privs: %v", err)
+		t.Fatalf("parse expected capabilities: %v", err)
 	}
 
-	mode := os.Getenv("AIRJAIL_CHILD_CAPABILITIES_TEST_MODE")
-	keptNames := []string{}
+	mask := dangerousCapabilityMask
+	if mode == "rootless" {
+		mask = ^uint64(0)
+	}
 
-	if mode == "keep" {
-		for _, capability := range dangerousCapabilities {
-			if capabilityPermitted(data, capability.value) {
-				keptNames = append(keptNames, capability.name)
+	checked := 0
 
-				break
-			}
+	for line := range strings.SplitSeq(string(status), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
 		}
 
-		if len(keptNames) == 0 {
-			tb.Skip("no dangerous capability is available to preserve")
-		}
-	}
-
-	keptName := ""
-	if len(keptNames) != 0 {
-		keptName = keptNames[0]
-	}
-
-	if mode == childCapabilitiesRootless {
-		noNewPrivileges = 1
-	}
-
-	options := SupervisorOptions{
-		PreservePermissions:    mode != childCapabilitiesRootless,
-		KeepUnsafeCapabilities: keptNames,
-		Environment: append(os.Environ(),
-			childCapabilitiesTestStage+"=check",
-			"AIRJAIL_CHILD_CAPABILITIES_TEST_KEEP="+keptName,
-			"AIRJAIL_CHILD_CAPABILITIES_TEST_NNP="+strconv.Itoa(noNewPrivileges),
-		),
-	}
-
-	// Match the supervisor's ownership: this goroutine exits with its modified
-	// OS thread still locked, and reports the executed child's result.
-	result := make(chan error, 1)
-
-	go func() {
-		exitCode, runErr := runSupervisorChild(tb.Context(),
-			[]string{os.Args[0], "-test.run=^TestSupervisorChildCapabilitiesProcess$"}, options)
-		if runErr == nil && exitCode != 0 {
-			runErr = fmt.Errorf("child exit status %d", exitCode)
-		}
-
-		result <- runErr
-	}()
-
-	err = <-result
-	if err != nil {
-		tb.Fatalf("run supervisor child: %v", err)
-	}
-}
-
-func checkExecutedChildCapabilities(tb testing.TB) {
-	tb.Helper()
-
-	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
-	data := [2]unix.CapUserData{}
-
-	err := unix.Capget(&header, &data[0])
-	if err != nil {
-		tb.Fatalf("read executed child capabilities: %v", err)
-	}
-
-	rootless := os.Getenv("AIRJAIL_CHILD_CAPABILITIES_TEST_MODE") == childCapabilitiesRootless
-	if rootless && data != [2]unix.CapUserData{} {
-		tb.Fatalf("rootless child retains capabilities: %#v", data)
-	}
-
-	keptName := os.Getenv("AIRJAIL_CHILD_CAPABILITIES_TEST_KEEP")
-
-	for capability := range 64 {
-		bounded, boundingErr := unix.PrctlRetInt(unix.PR_CAPBSET_READ, uintptr(capability), 0, 0, 0)
-		if boundingErr == unix.EINVAL {
-			break
-		}
-
-		if boundingErr != nil {
-			tb.Fatalf("read child bounding capability %d: %v", capability, boundingErr)
-		}
-
-		ambient, ambientErr := unix.PrctlRetInt(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_IS_SET,
-			uintptr(capability), 0, 0)
-		if ambientErr != nil {
-			tb.Fatalf("read child ambient capability %d: %v", capability, ambientErr)
-		}
-
-		if rootless && (bounded != 0 || ambient != 0) {
-			tb.Errorf("rootless capability %d: bounding=%d ambient=%d", capability, bounded, ambient)
-		}
-
-		for _, dangerous := range dangerousCapabilities {
-			if dangerous.value != capability {
-				continue
+		switch fields[0] {
+		case "CapEff:", "CapPrm:", "CapInh:", "CapAmb:", "CapBnd:":
+			value, parseErr := strconv.ParseUint(fields[1], 16, 64)
+			if parseErr != nil || value&mask != want {
+				t.Errorf("%s %s, %v; expected dangerous bits %x", fields[0], fields[1], parseErr, want)
 			}
 
-			want := dangerous.name == keptName
-
-			inheritable := data[capability/32].Inheritable&(uint32(1)<<uint(capability%32)) != 0
-			if capabilityEffective(data, capability) != want || capabilityPermitted(data, capability) != want ||
-				inheritable != want || (bounded != 0) != want || (ambient != 0) != want {
-				tb.Errorf("unexpected child sets for %s (kept=%t): data=%#v bounding=%d ambient=%d",
-					dangerous.name, want, data, bounded, ambient)
+			checked++
+		case "NoNewPrivs:":
+			if fields[1] != os.Getenv("AIRJAIL_CHILD_NNP") {
+				t.Errorf("no_new_privs = %s, want %s", fields[1], os.Getenv("AIRJAIL_CHILD_NNP"))
 			}
+
+			checked++
 		}
 	}
 
-	noNewPrivileges, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
-	if err != nil || strconv.Itoa(noNewPrivileges) != os.Getenv("AIRJAIL_CHILD_CAPABILITIES_TEST_NNP") {
-		tb.Fatalf("executed child no_new_privs = %d, %v", noNewPrivileges, err)
+	if checked != 6 {
+		t.Fatalf("missing capability or no_new_privs status fields: checked %d", checked)
 	}
 }

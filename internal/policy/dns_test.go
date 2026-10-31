@@ -1,9 +1,8 @@
-//nolint:goconst // Repeated policy literals keep each DNS scenario self-contained.
+//nolint:goconst // Complete policy scenarios are easier to compare without shared rule constants.
 package policy
 
 import (
 	"bytes"
-	"context"
 	"net/netip"
 	"strings"
 	"testing"
@@ -12,228 +11,175 @@ import (
 	"github.com/erikgeiser/airjail/internal/logging"
 )
 
-func TestResolutionPortSemantics(t *testing.T) {
+func TestRuntimeDNSGrantsRetainSourcePortsAndExpire(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		allowRules []string
-		blockRules []string
-		address    string
-		port       uint16
-		want       bool
-	}{
-		{
-			name:       "allowed port blocked",
-			allowRules: []string{"example.com:443"},
-			blockRules: []string{"192.0.2.1:443"},
-			address:    "192.0.2.1",
-			port:       443,
-		},
-		{
-			name:       "another port remains",
-			allowRules: []string{"example.com"},
-			blockRules: []string{"192.0.2.1:443"},
-			address:    "192.0.2.1",
-			port:       80,
-			want:       true,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			networkPolicy := newDNSPolicy(t, test.allowRules, test.blockRules)
-			now := time.Now()
-
-			authorization, allowed, err := networkPolicy.BeginResolution("example.com", now)
-			if err != nil {
-				t.Fatalf("BeginResolution: %v", err)
-			}
-
-			if !allowed {
-				t.Fatal("hostname query was unexpectedly denied before resolution")
-			}
-
-			allowed, err = networkPolicy.CommitResolution(
-				authorization,
-				ResolutionResult{
-					Addresses: []netip.Addr{netip.MustParseAddr(test.address)},
-					ExpiresAt: now.Add(time.Minute),
-				},
-				now,
-			)
-			if err != nil {
-				t.Fatalf("CommitResolution: %v", err)
-			}
-
-			if !allowed {
-				t.Fatal("CommitResolution unexpectedly rejected an authorized answer")
-			}
-
-			allowed, err = networkPolicy.Allows("", netip.MustParseAddr(test.address), test.port)
-			if err != nil {
-				t.Fatalf("Allows: %v", err)
-			}
-
-			if allowed != test.want {
-				t.Errorf("Allows() = %t, want %t", allowed, test.want)
-			}
-		})
-	}
-}
-
-func TestResolutionAliasGrantRetainsOriginalPolicy(t *testing.T) {
-	t.Parallel()
-
-	networkPolicy := newDNSPolicy(t, []string{"example.com"}, nil)
+	networkPolicy := newDNSPolicy(t, []string{"*.example.com:443"}, nil)
 	now := time.Now()
+	expires := now.Add(time.Hour)
+	address := netip.MustParseAddr("192.0.2.30")
 
-	authorization, allowed, err := networkPolicy.BeginResolution("example.com", now)
+	authorization, allowed, err := networkPolicy.BeginResolution("service.example.com", now)
 	if err != nil || !allowed {
-		t.Fatalf("BeginResolution(example.com) = %t, %v", allowed, err)
+		t.Fatalf("authorize source name = %t, %v", allowed, err)
 	}
 
-	allowed, err = networkPolicy.CommitResolution(
-		authorization,
-		ResolutionResult{CNAMEChain: []string{"cdn.test"}, ExpiresAt: now.Add(time.Minute)},
-		now,
-	)
-	if err != nil || !allowed {
-		t.Fatalf("CommitResolution(CNAME) = %t, %v", allowed, err)
+	_, allowed, err = networkPolicy.BeginResolution("cdn.test", now)
+	if err != nil || allowed {
+		t.Fatalf("unlearned alias authorization = %t, %v", allowed, err)
+	}
+
+	_, err = networkPolicy.CommitResolution(authorization, ResolutionResult{
+		CNAMEChain: []string{"cdn.test"},
+		Addresses:  []netip.Addr{address},
+		ExpiresAt:  expires,
+	}, now)
+	if err != nil {
+		t.Fatalf("install resolution: %v", err)
 	}
 
 	aliasAuthorization, allowed, err := networkPolicy.BeginResolution("cdn.test", now)
 	if err != nil || !allowed {
-		t.Fatalf("BeginResolution(cdn.test) = %t, %v", allowed, err)
+		t.Fatalf("learned alias authorization = %t, %v", allowed, err)
 	}
 
-	address := netip.MustParseAddr("192.0.2.20")
+	aliasAddress := netip.MustParseAddr("192.0.2.31")
 
-	allowed, err = networkPolicy.CommitResolution(
-		aliasAuthorization,
-		ResolutionResult{Addresses: []netip.Addr{address}, ExpiresAt: now.Add(time.Minute)},
-		now,
-	)
-	if err != nil || !allowed {
-		t.Fatalf("CommitResolution(address) = %t, %v", allowed, err)
-	}
-
-	allowed, err = networkPolicy.Allows("", address, 443)
+	_, err = networkPolicy.CommitResolution(aliasAuthorization, ResolutionResult{
+		Addresses: []netip.Addr{aliasAddress},
+		ExpiresAt: expires,
+	}, now)
 	if err != nil {
-		t.Fatalf("Allows: %v", err)
+		t.Fatalf("install alias resolution: %v", err)
 	}
 
-	if !allowed {
-		t.Fatal("address resolved through CNAME alias was not dynamically allowed")
+	for _, target := range []netip.Addr{address, aliasAddress} {
+		for _, port := range []uint16{443, 80} {
+			allowed, err = networkPolicy.Allows("", target, port)
+			if err != nil || allowed != (port == 443) {
+				t.Errorf("live grant for %s:%d = %t, %v", target, port, allowed, err)
+			}
+		}
+	}
+
+	// Advance through the existing time-aware resolution API, without sleeps.
+	_, allowed, err = networkPolicy.BeginResolution("cdn.test", expires.Add(time.Second))
+	if err != nil || allowed {
+		t.Fatalf("expired alias authorization = %t, %v", allowed, err)
+	}
+
+	for _, target := range []netip.Addr{address, aliasAddress} {
+		allowed, err = networkPolicy.Allows("", target, 443)
+		if err != nil || allowed {
+			t.Errorf("expired grant for %s = %t, %v", target, allowed, err)
+		}
 	}
 }
 
-func TestExpiredResolutionGrantIsRemoved(t *testing.T) {
+func TestDNSResolutionPreservesBlockScopeAndLifetime(t *testing.T) {
 	t.Parallel()
 
-	networkPolicy := newDNSPolicy(t, []string{"*.example.com"}, nil)
-	now := time.Now()
-
-	authorization, allowed, err := networkPolicy.BeginResolution("service.example.com", now)
-	if err != nil || !allowed {
-		t.Fatalf("BeginResolution = %t, %v", allowed, err)
-	}
-
-	address := netip.MustParseAddr("192.0.2.30")
-
-	allowed, err = networkPolicy.CommitResolution(
-		authorization,
-		ResolutionResult{Addresses: []netip.Addr{address}, ExpiresAt: now.Add(-time.Second)},
-		now,
-	)
-	if err != nil || !allowed {
-		t.Fatalf("CommitResolution = %t, %v", allowed, err)
-	}
-
-	allowed, err = networkPolicy.Allows("", address, 443)
-	if err != nil {
-		t.Fatalf("Allows: %v", err)
-	}
-
-	if allowed {
-		t.Fatal("expired DNS grant still allowed a direct address")
-	}
-}
-
-func TestResolutionAuthorizationRejectsImplicitHostnames(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		allowRules []string
-		blockRules []string
+	for _, test := range []struct {
+		name        string
+		block       string
+		port        uint16
+		want        bool
+		afterExpiry bool
 	}{
-		{name: "address block-only", blockRules: []string{"192.0.2.1"}},
-		{name: "prefix block-only", blockRules: []string{"192.0.2.0/24"}},
-		{name: "mixed block-only", blockRules: []string{"blocked.example", "192.0.2.1"}},
-		{name: "address allow", allowRules: []string{"192.0.2.0/24"}},
-	}
-
-	for _, test := range tests {
+		{name: "address veto", block: "192.0.2.1:443", port: 443},
+		{name: "address veto other port", block: "192.0.2.1:443", port: 80, want: true, afterExpiry: true},
+		{name: "CNAME veto", block: "*.cdn.test:443", port: 443, afterExpiry: true},
+		{name: "CNAME veto other port", block: "*.cdn.test:443", port: 80, want: true, afterExpiry: true},
+	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			networkPolicy := newDNSPolicy(t, test.allowRules, test.blockRules)
+			networkPolicy := newDNSPolicy(t, []string{"*.example.com", "192.0.2.0/24"}, []string{test.block})
+			now := time.Now()
+			address := netip.MustParseAddr("192.0.2.1")
 
-			_, allowed, err := networkPolicy.BeginResolution("data.c2.example", time.Now())
-			if err != nil {
-				t.Fatalf("BeginResolution: %v", err)
+			authorization, allowed, err := networkPolicy.BeginResolution("service.example.com", now)
+			if err != nil || !allowed {
+				t.Fatalf("authorize query = %t, %v", allowed, err)
 			}
 
-			if allowed {
-				t.Fatal("arbitrary hostname resolution was allowed")
+			_, err = networkPolicy.CommitResolution(authorization, ResolutionResult{
+				CNAMEChain: []string{"edge.cdn.test"},
+				Addresses:  []netip.Addr{address},
+				ExpiresAt:  now.Add(time.Hour),
+			}, now)
+			if err != nil {
+				t.Fatalf("install resolution: %v", err)
+			}
+
+			allowed, err = networkPolicy.Allows("", address, test.port)
+			if err != nil || allowed != test.want {
+				t.Fatalf("connection on port %d = %t, %v; want %t", test.port, allowed, err, test.want)
+			}
+
+			_, _, err = networkPolicy.BeginResolution("service.example.com", now.Add(2*time.Hour))
+			if err != nil {
+				t.Fatalf("expire DNS state: %v", err)
+			}
+
+			allowed, err = networkPolicy.Allows("", address, test.port)
+			if err != nil || allowed != test.afterExpiry {
+				t.Errorf("connection after TTL expiration = %t, %v; want %t", allowed, err, test.afterExpiry)
 			}
 		})
 	}
 }
 
-func TestArbitraryDNSAllowsResolutionWithoutBypassingAddressPolicy(t *testing.T) {
+func TestDNSAuthorizationIsSeparateFromConnectionPolicy(t *testing.T) {
 	t.Parallel()
 
-	resolver := &fakeResolver{addresses: map[string][]netip.Addr{}, errors: map[string]error{}}
+	for _, test := range []struct {
+		name      string
+		allow     []string
+		block     []string
+		arbitrary bool
+		wantDNS   bool
+	}{
+		{name: "address blocklist", block: []string{"192.0.2.1"}},
+		{name: "prefix blocklist", block: []string{"192.0.2.0/24"}},
+		{name: "mixed blocklist", block: []string{"blocked.example@192.0.2.1", "192.0.2.2"}},
+		{name: "address allowlist", allow: []string{"192.0.2.0/24"}},
+		{name: "explicit DNS permission", allow: []string{"192.0.2.0/24"}, arbitrary: true, wantDNS: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	networkPolicy, err := New(context.Background(), []string{"192.0.2.0/24"}, nil, Options{
-		Resolver:          resolver,
-		AllowUnresolved:   true,
-		AllowArbitraryDNS: true,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+			networkPolicy, err := New(t.Context(), test.allow, test.block, Options{AllowArbitraryDNS: test.arbitrary})
+			if err != nil {
+				t.Fatalf("create policy: %v", err)
+			}
 
-	now := time.Now()
+			now := time.Now()
 
-	authorization, allowed, err := networkPolicy.BeginResolution("data.c2.example", now)
-	if err != nil || !allowed {
-		t.Fatalf("BeginResolution = %t, %v", allowed, err)
-	}
+			authorization, allowed, err := networkPolicy.BeginResolution("data.c2.example", now)
+			if err != nil || allowed != test.wantDNS {
+				t.Fatalf("DNS authorization = %t, %v; want %t", allowed, err, test.wantDNS)
+			}
 
-	allowed, err = networkPolicy.CommitResolution(authorization, ResolutionResult{
-		Addresses: []netip.Addr{netip.MustParseAddr("198.51.100.1")},
-		ExpiresAt: now.Add(time.Minute),
-	}, now)
-	if err != nil {
-		t.Fatalf("CommitResolution: %v", err)
-	}
+			if !allowed {
+				return
+			}
 
-	if !allowed {
-		t.Fatal("CommitResolution unexpectedly rejected an authorized answer")
-	}
+			outsideAllowlist := netip.MustParseAddr("198.51.100.1")
 
-	allowed, err = networkPolicy.Allows("", netip.MustParseAddr("198.51.100.1"), 443)
-	if err != nil {
-		t.Fatalf("Allows: %v", err)
-	}
+			_, err = networkPolicy.CommitResolution(authorization, ResolutionResult{
+				Addresses: []netip.Addr{outsideAllowlist},
+				ExpiresAt: now.Add(time.Hour),
+			}, now)
+			if err != nil {
+				t.Fatalf("install arbitrary resolution: %v", err)
+			}
 
-	if allowed {
-		t.Fatal("arbitrary DNS bypassed address policy")
+			allowed, err = networkPolicy.Allows("", outsideAllowlist, 443)
+			if err != nil || allowed {
+				t.Fatalf("arbitrary DNS bypassed address policy: %t, %v", allowed, err)
+			}
+		})
 	}
 }
 
@@ -262,7 +208,7 @@ func TestBlocklistDNSRestrictionLog(t *testing.T) {
 
 			logger, err := logging.New(&output, test.level, "")
 			if err != nil {
-				t.Fatalf("logging.New: %v", err)
+				t.Fatalf("create logger: %v", err)
 			}
 
 			_, err = New(t.Context(), test.allow, test.block, Options{
@@ -270,27 +216,24 @@ func TestBlocklistDNSRestrictionLog(t *testing.T) {
 				Logger:            logger,
 			})
 			if err != nil {
-				t.Fatalf("New: %v", err)
+				t.Fatalf("create policy: %v", err)
 			}
 
 			if got := strings.Contains(output.String(), "--allow-arbitrary-dns"); got != test.wantLog {
-				t.Errorf("restriction log present = %t, want %t", got, test.wantLog)
+				t.Errorf("restriction advice present = %t, want %t", got, test.wantLog)
 			}
 		})
 	}
 }
 
-func newDNSPolicy(t *testing.T, allowRules, blockRules []string) *Policy {
-	t.Helper()
+func newDNSPolicy(tb testing.TB, allowRules, blockRules []string) *Policy {
+	tb.Helper()
 
-	resolver := &fakeResolver{addresses: map[string][]netip.Addr{}, errors: map[string]error{}}
-
-	networkPolicy, err := New(context.Background(), allowRules, blockRules, Options{
-		Resolver:        resolver,
-		AllowUnresolved: true,
+	networkPolicy, err := New(tb.Context(), allowRules, blockRules, Options{AllowUnresolved: true,
+		Resolver: &fakeResolver{addresses: map[string][]netip.Addr{}, errors: map[string]error{}},
 	})
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		tb.Fatalf("create policy: %v", err)
 	}
 
 	return networkPolicy

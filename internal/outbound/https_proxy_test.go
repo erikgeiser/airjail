@@ -1,7 +1,8 @@
+//nolint:goconst // Proxy authorities are repeated across subprocess boundaries.
 package outbound
 
 import (
-	"crypto/x509"
+	"crypto/tls"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -12,14 +13,48 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-const httpsProxyTestURL = "AIRJAIL_HTTPS_PROXY_TEST_URL"
-
 func TestHTTPSProxyCertificateVerification(t *testing.T) {
 	t.Parallel()
+
+	//nolint:nestif // Isolated client connection and certificate checks.
+	if proxyURL := os.Getenv("AIRJAIL_TEST_HTTPS_PROXY"); proxyURL != "" {
+		router, err := NewProxyAwareRouter(nil, proxyURL, defaultConnectTimeout)
+		if err != nil {
+			t.Fatalf("create router: %v", err)
+		}
+
+		connection, err := router.Dial(t.Context(), "service.example", netip.MustParseAddr("192.0.2.10"), 443)
+		if connection != nil {
+			t.Cleanup(func() { _ = connection.Close() })
+		}
+
+		if os.Getenv("AIRJAIL_TEST_TLS_FAILURE") == "true" {
+			var certificateError *tls.CertificateVerificationError
+			if !errors.As(err, &certificateError) {
+				t.Fatalf("invalid proxy certificate: got %v, want certificate verification error", err)
+			}
+
+			return
+		}
+
+		if err != nil {
+			t.Fatalf("connect through trusted IP proxy: %v", err)
+		}
+
+		payload := make([]byte, 5)
+
+		_, err = io.ReadFull(connection, payload)
+		if err != nil || string(payload) != "hello" {
+			t.Fatalf("tunnel payload = %q, %v", payload, err)
+		}
+
+		return
+	}
 
 	proxy := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodConnect || request.Host != "192.0.2.10:443" {
@@ -31,14 +66,14 @@ func TestHTTPSProxyCertificateVerification(t *testing.T) {
 
 		hijacker, ok := writer.(http.Hijacker)
 		if !ok {
-			t.Error("proxy response writer does not support hijacking")
+			t.Error("proxy does not support hijacking")
 
 			return
 		}
 
 		connection, _, err := hijacker.Hijack()
 		if err != nil {
-			t.Errorf("hijack CONNECT: %v", err)
+			t.Errorf("hijack proxy connection: %v", err)
 
 			return
 		}
@@ -48,91 +83,44 @@ func TestHTTPSProxyCertificateVerification(t *testing.T) {
 	}))
 	proxy.Config.ErrorLog = log.New(io.Discard, "", 0)
 	proxy.StartTLS()
-
 	t.Cleanup(proxy.Close)
 
 	for _, test := range []struct {
 		name    string
 		trusted bool
 		url     string
+		reject  bool
 	}{
 		{name: "trusted IP", trusted: true, url: proxy.URL},
-		{name: "untrusted IP", url: proxy.URL},
-		{name: "mismatched name", trusted: true, url: strings.Replace(proxy.URL, "127.0.0.1", "localhost", 1)},
+		{name: "untrusted IP", url: proxy.URL, reject: true},
+		{name: "wrong identity", trusted: true, url: strings.Replace(proxy.URL, "127.0.0.1", "localhost", 1), reject: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
 			directory := t.TempDir()
-			certificatePath := filepath.Join(directory, "roots.pem")
-			certificate := []byte{}
 
+			rootsPath := filepath.Join(directory, "roots.pem")
 			if test.trusted {
-				certificate = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: proxy.Certificate().Raw})
+				err := os.WriteFile(rootsPath, pem.EncodeToMemory(&pem.Block{
+					Type: "CERTIFICATE", Bytes: proxy.Certificate().Raw,
+				}), 0o600)
+				if err != nil {
+					t.Fatalf("write trusted roots: %v", err)
+				}
 			}
 
-			err := os.WriteFile(certificatePath, certificate, 0o600)
-			if err != nil {
-				t.Fatalf("write test roots: %v", err)
-			}
+			// System certificate roots are cached, so each trust case needs a fresh process.
+			command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestHTTPSProxyCertificateVerification$")
 
-			// A fresh process avoids the standard library's cached system roots.
-			command := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestHTTPSProxyProcess$")
-
-			command.Env = append(os.Environ(),
-				httpsProxyTestURL+"="+test.url,
-				"AIRJAIL_HTTPS_PROXY_TEST_CASE="+test.name,
-				"SSL_CERT_FILE="+certificatePath,
-				"SSL_CERT_DIR="+directory,
-			)
+			command.Env = append(os.Environ(), "AIRJAIL_TEST_HTTPS_PROXY="+test.url,
+				"AIRJAIL_TEST_TLS_FAILURE="+strconv.FormatBool(test.reject),
+				"SSL_CERT_FILE="+rootsPath, "SSL_CERT_DIR="+directory)
 
 			output, err := command.CombinedOutput()
 			if err != nil {
 				t.Fatalf("HTTPS proxy subprocess: %v\n%s", err, output)
 			}
 		})
-	}
-}
-
-func TestHTTPSProxyProcess(t *testing.T) {
-	proxyURL := os.Getenv(httpsProxyTestURL)
-	if proxyURL == "" {
-		return
-	}
-
-	router, err := NewProxyAwareRouter(nil, proxyURL, defaultConnectTimeout)
-	if err != nil {
-		t.Fatalf("NewProxyAwareRouter: %v", err)
-	}
-
-	connection, err := router.Dial(t.Context(), "service.example", netip.MustParseAddr("192.0.2.10"), 443)
-	if connection != nil {
-		defer func() { _ = connection.Close() }()
-	}
-
-	switch os.Getenv("AIRJAIL_HTTPS_PROXY_TEST_CASE") {
-	case "untrusted IP":
-		var certificateError x509.UnknownAuthorityError
-		if !errors.As(err, &certificateError) {
-			t.Fatalf("Dial error = %v, want unknown certificate authority", err)
-		}
-	case "mismatched name":
-		var certificateError x509.HostnameError
-		if !errors.As(err, &certificateError) {
-			t.Fatalf("Dial error = %v, want certificate hostname mismatch", err)
-		}
-	case "trusted IP":
-		if err != nil {
-			t.Fatalf("Dial: %v", err)
-		}
-
-		payload := make([]byte, 5)
-
-		_, err = io.ReadFull(connection, payload)
-		if err != nil || string(payload) != "hello" {
-			t.Fatalf("read tunnel payload = %q, %v, want hello", payload, err)
-		}
-	default:
-		t.Fatal("unexpected HTTPS proxy test case")
 	}
 }

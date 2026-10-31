@@ -68,6 +68,16 @@ keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 		t.Fatalf("write config: %v", err)
 	}
 
+	fromFile, err := Parse([]string{"--config", configPath, "command"})
+	if err != nil {
+		t.Fatalf("parse config without overrides: %v", err)
+	}
+
+	if fromFile.Config.Log != "debug" || fromFile.Config.ConnectTimeout != 20*time.Second ||
+		fromFile.Config.TransparentFallback || !fromFile.Config.PrivateLoopback {
+		t.Fatalf("CLI defaults overrode file settings: %#v", fromFile.Config)
+	}
+
 	invocation, err := Parse([]string{
 		"--config", configPath,
 		"--allow", "cli.example",
@@ -181,80 +191,5 @@ func TestParseRejectsInvalidConfigConnectTimeout(t *testing.T) {
 	_, err = Parse([]string{"--config", configPath, "command"})
 	if err == nil {
 		t.Fatal("Parse unexpectedly accepted a zero config connect timeout")
-	}
-}
-
-func TestParseSupervisor(t *testing.T) {
-	t.Parallel()
-
-	invocation, err := ParseSupervisor([]string{
-		"--http-socket", "/run/http.sock",
-		"--socks-socket", "/run/socks.sock",
-		"--dns-socket", "/run/dns.sock",
-		"--log-level", "debug",
-		"--preserve-permissions",
-		"--restrict-unix-sockets",
-		"--manage-foreground",
-		"--keep-unsafe-capability", "CAP_SYS_ADMIN",
-		"--transparent-tcp",
-		"--private-loopback",
-		"--",
-		"command", "--child-flag",
-	})
-	if err != nil {
-		t.Fatalf("ParseSupervisor: %v", err)
-	}
-
-	if invocation.HTTPSocket != "/run/http.sock" || invocation.SOCKSocket != "/run/socks.sock" ||
-		invocation.DNSSocket != "/run/dns.sock" {
-		t.Errorf("proxy sockets = %q, %q, %q", invocation.HTTPSocket, invocation.SOCKSocket, invocation.DNSSocket)
-	}
-
-	if invocation.LogLevel != "debug" || !invocation.PreservePermissions || !invocation.RestrictUnixSockets ||
-		!invocation.ManageForeground || !invocation.TransparentTCP || !invocation.PrivateLoopback {
-		t.Errorf("supervisor options = %#v", invocation)
-	}
-
-	if !slices.Equal(invocation.KeepUnsafeCapabilities, []string{"CAP_SYS_ADMIN"}) {
-		t.Errorf("KeepUnsafeCapabilities = %v", invocation.KeepUnsafeCapabilities)
-	}
-
-	if !slices.Equal(invocation.Command, []string{"command", "--child-flag"}) {
-		t.Errorf("Command = %v", invocation.Command)
-	}
-}
-
-func TestParseSupervisorRejectsMissingCommand(t *testing.T) {
-	t.Parallel()
-
-	_, err := ParseSupervisor([]string{"--log-level", "debug"})
-	if err == nil {
-		t.Fatal("ParseSupervisor unexpectedly accepted a missing command")
-	}
-}
-
-func TestParseRestrictedExec(t *testing.T) {
-	t.Parallel()
-
-	invocation, err := ParseRestrictedExec([]string{"--log-level", "debug", "--", "command", "--flag"})
-	if err != nil {
-		t.Fatalf("ParseRestrictedExec: %v", err)
-	}
-
-	if invocation.LogLevel != "debug" {
-		t.Errorf("LogLevel = %q, want debug", invocation.LogLevel)
-	}
-
-	if !slices.Equal(invocation.Command, []string{"command", "--flag"}) {
-		t.Errorf("Command = %v", invocation.Command)
-	}
-}
-
-func TestParseRestrictedExecRejectsMissingCommand(t *testing.T) {
-	t.Parallel()
-
-	_, err := ParseRestrictedExec([]string{"--"})
-	if err == nil {
-		t.Fatal("ParseRestrictedExec unexpectedly accepted a missing command")
 	}
 }

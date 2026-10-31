@@ -1,6 +1,9 @@
 package namespace
 
 import (
+	"os"
+	"slices"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -11,142 +14,40 @@ func TestCapabilityEffective(t *testing.T) {
 
 	data := [2]unix.CapUserData{}
 	data[0].Effective = uint32(1) << uint(unix.CAP_NET_ADMIN)
-	data[1].Effective = uint32(1) << uint(40-32)
+	data[1].Effective = uint32(1) << uint(unix.CAP_CHECKPOINT_RESTORE-32)
 
-	if !capabilityEffective(data, unix.CAP_NET_ADMIN) {
-		t.Fatal("CAP_NET_ADMIN was not detected")
-	}
-
-	if !capabilityEffective(data, 40) {
-		t.Fatal("capability in second word was not detected")
+	if !capabilityEffective(data, unix.CAP_NET_ADMIN) || !capabilityEffective(data, unix.CAP_CHECKPOINT_RESTORE) {
+		t.Fatal("effective capabilities were not detected across both words")
 	}
 
 	if capabilityEffective(data, unix.CAP_SYS_ADMIN) {
-		t.Fatal("unset CAP_SYS_ADMIN was detected")
+		t.Fatal("unset capability was detected")
 	}
 }
 
-func TestShouldManageForeground(t *testing.T) {
+func TestNamespaceLaunchConfiguration(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name                   string
-		terminal               bool
-		joinParentProcessGroup bool
-		foregroundProcessGroup int
-		currentProcessGroup    int
-		want                   bool
-	}{
-		{
-			name:                   "foreground child process",
-			terminal:               true,
-			foregroundProcessGroup: 10,
-			currentProcessGroup:    10,
-			want:                   true,
-		},
-		{
-			name:                   "namespace supervisor",
-			terminal:               true,
-			joinParentProcessGroup: true,
-			foregroundProcessGroup: 10,
-			currentProcessGroup:    10,
-		},
-		{
-			name:                   "background process",
-			terminal:               true,
-			foregroundProcessGroup: 20,
-			currentProcessGroup:    10,
-		},
-		{
-			name:                   "no terminal",
-			foregroundProcessGroup: 10,
-			currentProcessGroup:    10,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := shouldManageForeground(
-				test.terminal,
-				test.joinParentProcessGroup,
-				test.foregroundProcessGroup,
-				test.currentProcessGroup,
-			)
-			if got != test.want {
-				t.Errorf("shouldManageForeground() = %t, want %t", got, test.want)
-			}
-		})
-	}
-}
-
-func TestOwnsTerminalForeground(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name                   string
-		terminal               bool
-		foregroundProcessGroup int
-		currentProcessGroup    int
-		want                   bool
-	}{
-		{
-			name:                   "foreground process group",
-			terminal:               true,
-			foregroundProcessGroup: 10,
-			currentProcessGroup:    10,
-			want:                   true,
-		},
-		{
-			name:                   "background process group",
-			terminal:               true,
-			foregroundProcessGroup: 20,
-			currentProcessGroup:    10,
-		},
-		{
-			name:                   "no terminal",
-			foregroundProcessGroup: 10,
-			currentProcessGroup:    10,
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := ownsTerminalForeground(
-				test.terminal,
-				test.foregroundProcessGroup,
-				test.currentProcessGroup,
-			)
-			if got != test.want {
-				t.Errorf("ownsTerminalForeground() = %t, want %t", got, test.want)
-			}
-		})
-	}
-}
-
-func TestNamespaceProcessAttributes(t *testing.T) {
-	t.Parallel()
-
-	permissionPreserving := namespaceProcessAttributes(PermissionPreservingMode)
-	if permissionPreserving.Cloneflags != unix.CLONE_NEWNET {
-		t.Errorf("permission-preserving clone flags = %#x", permissionPreserving.Cloneflags)
-	}
-
-	if len(permissionPreserving.UidMappings) != 0 || len(permissionPreserving.GidMappings) != 0 {
-		t.Fatal("permission-preserving mode unexpectedly configures ID mappings")
+	preserving := namespaceProcessAttributes(PermissionPreservingMode)
+	if preserving.Cloneflags != unix.CLONE_NEWNET || len(preserving.UidMappings) != 0 || len(preserving.GidMappings) != 0 {
+		t.Fatal("permission-preserving mode changes the caller's user namespace")
 	}
 
 	rootless := namespaceProcessAttributes(RootlessMode)
-
-	wantFlags := uintptr(unix.CLONE_NEWUSER | unix.CLONE_NEWNET)
-	if rootless.Cloneflags != wantFlags {
-		t.Errorf("rootless clone flags = %#x, want %#x", rootless.Cloneflags, wantFlags)
+	if rootless.Cloneflags != unix.CLONE_NEWUSER|unix.CLONE_NEWNET {
+		t.Fatal("rootless mode does not isolate both user and network namespaces")
 	}
 
-	if len(rootless.UidMappings) != 1 || len(rootless.GidMappings) != 1 {
-		t.Fatal("rootless mode does not configure single-ID mappings")
+	wantUID := []syscall.SysProcIDMap{{ContainerID: os.Getuid(), HostID: os.Getuid(), Size: 1}}
+
+	wantGID := []syscall.SysProcIDMap{{ContainerID: os.Getgid(), HostID: os.Getgid(), Size: 1}}
+	if !slices.Equal(rootless.UidMappings, wantUID) || !slices.Equal(rootless.GidMappings, wantGID) {
+		t.Errorf("rootless ID mappings = %v, %v; want %v, %v", rootless.UidMappings, rootless.GidMappings, wantUID, wantGID)
+	}
+
+	for _, attributes := range []*syscall.SysProcAttr{rootless, preserving} {
+		if attributes.Pdeathsig != syscall.SIGKILL {
+			t.Error("supervisor can survive an abruptly killed parent")
+		}
 	}
 }

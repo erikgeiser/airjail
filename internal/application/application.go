@@ -11,9 +11,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/erikgeiser/airjail/internal/cli"
+	"github.com/erikgeiser/airjail/internal/config"
 	"github.com/erikgeiser/airjail/internal/logging"
 	"github.com/erikgeiser/airjail/internal/namespace"
 	"github.com/erikgeiser/airjail/internal/outbound"
@@ -117,7 +117,17 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 		return 0, err
 	}
 
-	environment := childEnvironment(os.Environ(), !networkPolicy.Empty(), invocation.Config.PrivateLoopback)
+	child := namespace.ParentOptions{
+		Executable:             executable,
+		Command:                invocation.Command,
+		Environment:            childEnvironment(os.Environ(), !networkPolicy.Empty(), invocation.Config.PrivateLoopback),
+		Directory:              workingDirectory,
+		Mode:                   namespaceMode,
+		RestrictUnixSockets:    invocation.Config.RestrictUnixSockets,
+		KeepUnsafeCapabilities: invocation.Config.KeepUnsafeCapabilities,
+		PrivateLoopback:        invocation.Config.PrivateLoopback,
+		Logger:                 logger,
+	}
 
 	if invocation.Config.AllowArbitraryDNS {
 		logger.Infof("arbitrary DNS resolution enabled")
@@ -126,56 +136,21 @@ func Run(ctx context.Context, args []string, version string) (int, error) {
 	if networkPolicy.Empty() {
 		logger.Infof("empty policy: starting child in loopback-only namespace without proxies")
 
-		return namespace.Run(ctx, namespace.ParentOptions{
-			Executable:             executable,
-			Command:                invocation.Command,
-			Environment:            environment,
-			Directory:              workingDirectory,
-			Mode:                   namespaceMode,
-			RestrictUnixSockets:    invocation.Config.RestrictUnixSockets,
-			KeepUnsafeCapabilities: invocation.Config.KeepUnsafeCapabilities,
-			PrivateLoopback:        invocation.Config.PrivateLoopback,
-			Logger:                 logger,
-		})
+		return namespace.Run(ctx, child)
 	}
 
-	return runWithProxies(
-		ctx,
-		executable,
-		workingDirectory,
-		environment,
-		invocation.Command,
-		networkPolicy,
-		dnsResolver,
-		namespaceMode,
-		invocation.Config.RestrictUnixSockets,
-		invocation.Config.KeepUnsafeCapabilities,
-		invocation.Config.Proxy,
-		invocation.Config.ConnectTimeout,
-		invocation.Config.TransparentFallback,
-		invocation.Config.PrivateLoopback,
-		logger,
-	)
+	return runWithProxies(ctx, invocation.Config, child, networkPolicy, dnsResolver)
 }
 
 func runWithProxies(
 	ctx context.Context,
-	executable string,
-	workingDirectory string,
-	environment []string,
-	command []string,
+	configuration config.Config,
+	child namespace.ParentOptions,
 	networkPolicy *policy.Policy,
 	dnsResolver *proxydns.Resolver,
-	namespaceMode namespace.Mode,
-	restrictUnixSockets bool,
-	keepUnsafeCapabilities []string,
-	proxyURL string,
-	connectTimeout time.Duration,
-	transparentFallback bool,
-	privateLoopback bool,
-	logger *logging.Logger,
 ) (int, error) {
-	if !transparentFallback {
+	logger := child.Logger
+	if !configuration.TransparentFallback {
 		logger.Infof("transparent fallback disabled: only proxy-aware applications can use network egress")
 	}
 
@@ -195,61 +170,58 @@ func runWithProxies(
 		}
 	}()
 
-	listenConfig := net.ListenConfig{}
+	child.HTTPSocket = runDir.HTTPSocket
+	child.SOCKSocket = runDir.SOCKSocket
+	child.DNSSocket = ""
+	child.TransparentTCP = configuration.TransparentFallback
 
-	httpListener, err := listenConfig.Listen(ctx, "unix", runDir.HTTPSocket)
-	if err != nil {
-		return 0, fmt.Errorf("listen on outer HTTP proxy socket: %w", err)
-	}
-
-	logger.Debugf("HTTP proxy listening on %s", runDir.HTTPSocket)
-
+	listeners := make([]net.Listener, 0, 3)
 	defer func() {
-		err := httpListener.Close()
-		if err != nil && !errors.Is(err, net.ErrClosed) {
-			logger.Warnf("could not close HTTP listener: %v", err)
-		} else {
-			logger.Debugf("closed HTTP listener")
+		for _, listener := range listeners {
+			err := listener.Close()
+			if err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Warnf("close proxy listener %s: %v", listener.Addr(), err)
+			} else {
+				logger.Debugf("closed proxy listener %s", listener.Addr())
+			}
 		}
 	}()
 
-	socksListener, err := listenConfig.Listen(ctx, "unix", runDir.SOCKSocket)
-	if err != nil {
-		return 0, fmt.Errorf("listen on outer SOCKS proxy socket: %w", err)
+	listen := func(name, path string) (net.Listener, error) {
+		listener, err := (&net.ListenConfig{}).Listen(ctx, "unix", path)
+		if err != nil {
+			return nil, fmt.Errorf("listen on outer %s proxy socket: %w", name, err)
+		}
+
+		listeners = append(listeners, listener)
+
+		logger.Debugf("%s proxy listening on %s", name, path)
+
+		return listener, nil
 	}
 
-	logger.Debugf("SOCKS proxy listening on %s", runDir.SOCKSocket)
+	httpListener, err := listen("HTTP", child.HTTPSocket)
+	if err != nil {
+		return 0, err
+	}
 
-	defer func() {
-		err := socksListener.Close()
-		if err != nil && !errors.Is(err, net.ErrClosed) {
-			logger.Warnf("could not close SOCKS listener: %v", err)
-		} else {
-			logger.Debugf("closed SOCKS listener")
-		}
-	}()
+	socksListener, err := listen("SOCKS", child.SOCKSocket)
+	if err != nil {
+		return 0, err
+	}
 
 	var dnsListener net.Listener
 
-	if transparentFallback {
-		dnsListener, err = listenConfig.Listen(ctx, "unix", runDir.DNSSocket)
+	if child.TransparentTCP {
+		child.DNSSocket = runDir.DNSSocket
+
+		dnsListener, err = listen("DNS", child.DNSSocket)
 		if err != nil {
-			return 0, fmt.Errorf("listen on outer DNS proxy socket: %w", err)
+			return 0, err
 		}
-
-		logger.Debugf("DNS proxy listening on %s", runDir.DNSSocket)
-
-		defer func() {
-			err := dnsListener.Close()
-			if err != nil && !errors.Is(err, net.ErrClosed) {
-				logger.Warnf("could not close DNS listener: %v", err)
-			} else {
-				logger.Debugf("closed DNS listener")
-			}
-		}()
 	}
 
-	router, err := outbound.NewProxyAwareRouter(os.Environ(), proxyURL, connectTimeout)
+	router, err := outbound.NewProxyAwareRouter(os.Environ(), configuration.Proxy, configuration.ConnectTimeout)
 	if err != nil {
 		return 0, err
 	}
@@ -257,18 +229,18 @@ func runWithProxies(
 	connector := outbound.NewRouted(networkPolicy, dnsResolver, router.Dial, logger)
 	httpServer := proxyhttp.New(connector.WithLoggerPrefix("HTTP proxy"))
 
-	socksServer, err := proxysocks.New(connector.WithLoggerPrefix("SOCKS proxy"), connectTimeout)
+	socksServer, err := proxysocks.New(connector.WithLoggerPrefix("SOCKS proxy"), configuration.ConnectTimeout)
 	if err != nil {
 		return 0, err
 	}
 
 	var dnsServer *proxydns.Server
 
-	if transparentFallback {
+	if child.TransparentTCP {
 		dnsServer, err = proxydns.NewWithResolver(
 			networkPolicy,
 			dnsResolver,
-			privateLoopback,
+			child.PrivateLoopback,
 			logger.WithPrefix("DNS proxy"),
 		)
 		if err != nil {
@@ -279,7 +251,7 @@ func runWithProxies(
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	serverGroup, serverCtx := errgroup.WithContext(ctx)
+	group, groupCtx := errgroup.WithContext(ctx)
 
 	runServer := func(
 		name string,
@@ -287,12 +259,12 @@ func runWithProxies(
 		serve func(context.Context, net.Listener) error,
 	) func() error {
 		return func() error {
-			err := serve(serverCtx, listener)
+			err := serve(groupCtx, listener)
 			if err != nil {
 				return err
 			}
 
-			if serverCtx.Err() == nil {
+			if groupCtx.Err() == nil {
 				return fmt.Errorf("%s proxy server stopped unexpectedly", name)
 			}
 
@@ -300,74 +272,37 @@ func runWithProxies(
 		}
 	}
 
-	serverGroup.Go(runServer("HTTP", httpListener, httpServer.Serve))
-	serverGroup.Go(runServer("SOCKS", socksListener, socksServer.Serve))
+	group.Go(runServer("HTTP", httpListener, httpServer.Serve))
+	group.Go(runServer("SOCKS", socksListener, socksServer.Serve))
 
-	if transparentFallback {
-		serverGroup.Go(runServer("DNS", dnsListener, dnsServer.Serve))
+	if child.TransparentTCP {
+		group.Go(runServer("DNS", dnsListener, dnsServer.Serve))
 	}
-
-	serverResults := make(chan error, 1)
-	go func() {
-		serverResults <- serverGroup.Wait()
-	}()
-
-	type commandResult struct {
-		exitCode int
-		err      error
-	}
-
-	commandResults := make(chan commandResult, 1)
-
-	dnsSocket := ""
-	if transparentFallback {
-		dnsSocket = runDir.DNSSocket
-	}
-
-	go func() {
-		exitCode, runErr := namespace.Run(serverCtx, namespace.ParentOptions{
-			Executable:             executable,
-			Command:                command,
-			Environment:            environment,
-			Directory:              workingDirectory,
-			HTTPSocket:             runDir.HTTPSocket,
-			SOCKSocket:             runDir.SOCKSocket,
-			DNSSocket:              dnsSocket,
-			Mode:                   namespaceMode,
-			RestrictUnixSockets:    restrictUnixSockets,
-			KeepUnsafeCapabilities: keepUnsafeCapabilities,
-			TransparentTCP:         transparentFallback,
-			PrivateLoopback:        privateLoopback,
-			Logger:                 logger,
-		})
-		commandResults <- commandResult{exitCode: exitCode, err: runErr}
-	}()
 
 	var (
-		result    commandResult
-		serverErr error
+		childExitCode int
+		childErr      error
 	)
 
-	select {
-	case result = <-commandResults:
-		cancel()
+	group.Go(func() error {
+		defer cancel()
 
-		serverErr = <-serverResults
-	case serverErr = <-serverResults:
-		cancel()
+		childExitCode, childErr = namespace.Run(groupCtx, child)
 
-		result = <-commandResults
+		return nil
+	})
+
+	serverErr := group.Wait()
+
+	if childErr != nil {
+		return 0, childErr
 	}
 
-	if result.err == nil {
-		result.err = serverErr
+	if serverErr != nil {
+		return 0, serverErr
 	}
 
-	if result.err != nil {
-		return 0, result.err
-	}
-
-	return result.exitCode, nil
+	return childExitCode, nil
 }
 
 func logSupplementaryGroupLimitation(logger *logging.Logger) {

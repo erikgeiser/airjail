@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -59,7 +60,15 @@ func TestSOCKSHostnameConnectPreservesPipelinedBytes(t *testing.T) {
 	target := listenTCP(t)
 	targetDone := make(chan error, 1)
 
+	t.Cleanup(func() {
+		_ = target.Close()
+
+		<-targetDone
+	})
+
 	go func() {
+		defer close(targetDone)
+
 		connection, err := target.Accept()
 		if err != nil {
 			targetDone <- err
@@ -71,6 +80,10 @@ func TestSOCKSHostnameConnectPreservesPipelinedBytes(t *testing.T) {
 		payload := make([]byte, 4)
 
 		_, err = io.ReadFull(connection, payload)
+		if err == nil && string(payload) != "ping" {
+			err = fmt.Errorf("request payload = %q, want ping", payload)
+		}
+
 		if err == nil {
 			_, err = connection.Write([]byte("pong"))
 		}
@@ -79,12 +92,8 @@ func TestSOCKSHostnameConnectPreservesPipelinedBytes(t *testing.T) {
 	}()
 
 	connector := connectorFunc(func(ctx context.Context, destination policy.Destination, port uint16) (net.Conn, error) {
-		if destination.Hostname() != "service.test" {
-			t.Fatalf("hostname = %q, want service.test", destination.Hostname())
-		}
-
-		if port != 8080 {
-			t.Fatalf("port = %d, want 8080", port)
+		if destination.Hostname() != "service.test" || port != 8080 {
+			return nil, fmt.Errorf("unexpected target %s:%d", destination.Hostname(), port)
 		}
 
 		return (&net.Dialer{}).DialContext(ctx, "tcp", target.Addr().String())
@@ -100,11 +109,31 @@ func TestSOCKSHostnameConnectPreservesPipelinedBytes(t *testing.T) {
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(ctx, listener) }()
 
+	t.Cleanup(func() {
+		cancel()
+
+		_ = listener.Close()
+
+		select {
+		case serveErr := <-serveDone:
+			if serveErr != nil {
+				t.Errorf("serve SOCKS: %v", serveErr)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("SOCKS server did not stop")
+		}
+	})
+
 	client, err := (&net.Dialer{}).DialContext(ctx, "tcp", listener.Addr().String())
 	if err != nil {
 		t.Fatalf("dial SOCKS proxy: %v", err)
 	}
 	defer func() { _ = client.Close() }()
+
+	err = client.SetDeadline(time.Now().Add(3 * time.Second))
+	if err != nil {
+		t.Fatalf("set client deadline: %v", err)
+	}
 
 	_, err = client.Write([]byte{5, 1, 0})
 	if err != nil {
@@ -159,17 +188,6 @@ func TestSOCKSHostnameConnectPreservesPipelinedBytes(t *testing.T) {
 	err = <-targetDone
 	if err != nil {
 		t.Fatalf("target server: %v", err)
-	}
-
-	cancel()
-
-	select {
-	case err = <-serveDone:
-		if err != nil {
-			t.Errorf("Serve: %v", err)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("SOCKS server did not stop")
 	}
 }
 

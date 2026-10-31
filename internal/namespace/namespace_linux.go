@@ -89,51 +89,31 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 		return 0, err
 	}
 
-	arguments := []string{options.Executable, cli.SupervisorCommand}
-	if options.HTTPSocket != "" {
-		arguments = append(arguments, "--"+cli.SupervisorHTTPSocketOption, options.HTTPSocket)
-	}
-
-	if options.SOCKSocket != "" {
-		arguments = append(arguments, "--"+cli.SupervisorSOCKSSocketOption, options.SOCKSocket)
-	}
-
-	if options.DNSSocket != "" {
-		arguments = append(arguments, "--"+cli.SupervisorDNSSocketOption, options.DNSSocket)
-	}
-
-	if options.Mode == PermissionPreservingMode {
-		arguments = append(arguments, "--"+cli.SupervisorPreservePermissionsOption)
-	}
-
-	if options.RestrictUnixSockets {
-		arguments = append(arguments, "--"+cli.SupervisorRestrictSocketsOption)
-	}
-
 	// Decide this in the outer process because the hidden supervisor is never
 	// its process-group leader. Detached sessions have no controlling terminal,
 	// while foreground wrappers such as `go run` legitimately share a job group.
 	terminal, foregroundProcessGroup := terminalForeground()
-	if ownsTerminalForeground(terminal, foregroundProcessGroup, unix.Getpgrp()) {
-		arguments = append(arguments, "--"+cli.SupervisorManageForegroundOption)
+
+	invocation := cli.SupervisorInvocation{
+		Command:                options.Command,
+		HTTPSocket:             options.HTTPSocket,
+		SOCKSocket:             options.SOCKSocket,
+		DNSSocket:              options.DNSSocket,
+		LogLevel:               options.Logger.LevelName(),
+		PreservePermissions:    options.Mode == PermissionPreservingMode,
+		RestrictUnixSockets:    options.RestrictUnixSockets,
+		ManageForeground:       ownsTerminalForeground(terminal, foregroundProcessGroup, unix.Getpgrp()),
+		KeepUnsafeCapabilities: keptCapabilities,
+		TransparentTCP:         options.TransparentTCP,
+		PrivateLoopback:        options.PrivateLoopback,
 	}
 
-	for _, capability := range keptCapabilities {
-		arguments = append(arguments, "--"+cli.SupervisorKeepUnsafeCapability, capability)
+	args, err := invocation.Args()
+	if err != nil {
+		return 0, err
 	}
 
-	if options.TransparentTCP {
-		arguments = append(arguments, "--"+cli.SupervisorTransparentTCPOption)
-	}
-
-	if options.PrivateLoopback {
-		arguments = append(arguments, "--"+cli.SupervisorPrivateLoopbackOption)
-	}
-
-	arguments = append(arguments, "--"+cli.SupervisorLogLevel, options.Logger.LevelName())
-
-	arguments = append(arguments, "--")
-	arguments = append(arguments, options.Command...)
+	arguments := append([]string{options.Executable, cli.SupervisorCommand}, args...)
 
 	sys := namespaceProcessAttributes(options.Mode)
 
@@ -385,13 +365,16 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 				return nil
 			}
 
-			command = append([]string{
-				executable,
-				cli.RestrictedExecCommand,
-				"--" + cli.RestrictedExecLogLevelOption,
-				options.Logger.LevelName(),
-				"--",
-			}, command...)
+			invocation := cli.RestrictedExecInvocation{Command: command, LogLevel: options.Logger.LevelName()}
+
+			args, encodeErr := invocation.Args()
+			if encodeErr != nil {
+				childErr = encodeErr
+
+				return nil
+			}
+
+			command = append([]string{executable, cli.RestrictedExecCommand}, args...)
 		}
 
 		childExitCode, childErr = runSupervisorChild(groupCtx, command, options)

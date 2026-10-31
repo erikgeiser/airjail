@@ -4,6 +4,7 @@ package proxydns
 import (
 	"context"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
@@ -48,23 +49,7 @@ func TestDNSPrivateLoopbackReturnsSyntheticLocalhostAnswers(t *testing.T) {
 
 	for _, test := range tests {
 		response := exchangeTestQuery(t, server, test.hostname, test.queryType)
-		if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
-			t.Fatalf(
-				"response for %s = %s with %d answers",
-				test.hostname,
-				dns.RcodeToString[response.Rcode],
-				len(response.Answer),
-			)
-		}
-
-		address := response.Answer[0].String()
-		if test.queryType == dns.TypeA {
-			if record, ok := response.Answer[0].(*dns.A); !ok || record.A.String() != test.want {
-				t.Errorf("answer for %s = %s, want %s", test.hostname, address, test.want)
-			}
-		} else if record, ok := response.Answer[0].(*dns.AAAA); !ok || record.AAAA.String() != test.want {
-			t.Errorf("answer for %s = %s, want %s", test.hostname, address, test.want)
-		}
+		mustAddressAnswers(t, response, test.want)
 	}
 
 	if called {
@@ -86,14 +71,10 @@ func TestDNSConfiguredSnapshotDoesNotReachUpstream(t *testing.T) {
 	})
 
 	response := exchangeTestQuery(t, server, "foo.bar.", dns.TypeA)
-	if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
-		t.Fatalf("A response = %s with %d answers", dns.RcodeToString[response.Rcode], len(response.Answer))
-	}
+	mustAddressAnswers(t, response, "10.0.0.1")
 
 	response = exchangeTestQuery(t, server, "foo.bar.", dns.TypeAAAA)
-	if response.Rcode != dns.RcodeSuccess || len(response.Answer) != 1 {
-		t.Fatalf("AAAA response = %s with %d answers", dns.RcodeToString[response.Rcode], len(response.Answer))
-	}
+	mustAddressAnswers(t, response, "2001:db8::1")
 
 	if called {
 		t.Fatal("configured snapshot reached upstream resolver")
@@ -166,7 +147,7 @@ func TestDNSAnswerBlockIsEnforcedAtConnectionTime(t *testing.T) {
 func TestDNSMixedAddressAnswerIsReturnedWithoutBypassingBlocks(t *testing.T) {
 	t.Parallel()
 
-	server, _ := newTestServer(t, []string{"*.example.com"}, []string{"192.0.2.10"}, func(request *dns.Msg) *dns.Msg {
+	server, networkPolicy := newTestServer(t, []string{"*.example.com"}, []string{"192.0.2.10"}, func(request *dns.Msg) *dns.Msg {
 		response := new(dns.Msg)
 		response.SetReply(request)
 		response.Answer = []dns.RR{
@@ -188,15 +169,28 @@ func TestDNSMixedAddressAnswerIsReturnedWithoutBypassingBlocks(t *testing.T) {
 		t.Fatalf("response code = %s, want NOERROR", dns.RcodeToString[response.Rcode])
 	}
 
-	if len(response.Answer) != 2 {
-		t.Errorf("answer count = %d, want 2", len(response.Answer))
+	mustAddressAnswers(t, response, "192.0.2.10", "192.0.2.11")
+
+	for _, test := range []struct {
+		address string
+		want    bool
+	}{
+		{address: "192.0.2.10"},
+		{address: "192.0.2.11", want: true},
+	} {
+		allowed, err := networkPolicy.Allows("", netip.MustParseAddr(test.address), 443)
+		if err != nil || allowed != test.want {
+			t.Errorf("connection to %s = %t, %v; want %t", test.address, allowed, err, test.want)
+		}
 	}
 }
 
 func TestDNSCIDRPolicyResolvesUnknownHostnameWhenArbitraryDNSIsEnabled(t *testing.T) {
 	t.Parallel()
 
+	called := false
 	server, _ := newTestServer(t, []string{"10.0.0.0/8"}, nil, func(request *dns.Msg) *dns.Msg {
+		called = true
 		response := new(dns.Msg)
 		response.SetReply(request)
 		response.Answer = []dns.RR{&dns.A{
@@ -208,8 +202,10 @@ func TestDNSCIDRPolicyResolvesUnknownHostnameWhenArbitraryDNSIsEnabled(t *testin
 	}, policy.Options{AllowArbitraryDNS: true})
 
 	response := exchangeTestQuery(t, server, "unknown.internal.", dns.TypeA)
-	if response.Rcode != dns.RcodeSuccess {
-		t.Fatalf("response code = %s, want NOERROR", dns.RcodeToString[response.Rcode])
+	mustAddressAnswers(t, response, "10.2.3.4")
+
+	if !called {
+		t.Fatal("authorized query never reached the resolver")
 	}
 }
 
@@ -446,6 +442,33 @@ func exchangeTestQuery(t *testing.T, server *Server, hostname string, queryType 
 	}
 
 	return response
+}
+
+func mustAddressAnswers(tb testing.TB, response *dns.Msg, want ...string) {
+	tb.Helper()
+
+	if response.Rcode != dns.RcodeSuccess {
+		tb.Fatalf("response code = %s, want NOERROR", dns.RcodeToString[response.Rcode])
+	}
+
+	got := make([]string, 0, len(response.Answer))
+	for _, answer := range response.Answer {
+		switch record := answer.(type) {
+		case *dns.A:
+			got = append(got, record.A.String())
+		case *dns.AAAA:
+			got = append(got, record.AAAA.String())
+		default:
+			tb.Fatalf("unexpected synthesized answer: %s", answer)
+		}
+	}
+
+	slices.Sort(got)
+	slices.Sort(want)
+
+	if !slices.Equal(got, want) {
+		tb.Fatalf("answer addresses = %v, want %v", got, want)
+	}
 }
 
 func TestClampTTL(t *testing.T) {

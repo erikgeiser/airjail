@@ -61,10 +61,13 @@ func (resolver *Resolver) Resolve(
 		ipv6, ipv6Err := resolver.resolveType(ctx, hostname, dns.TypeAAAA)
 
 		if ipv4Err != nil && ipv6Err != nil {
-			return policy.ResolutionResult{}, fmt.Errorf(
-				"resolve A and AAAA records: %w",
-				errors.Join(ipv4Err, ipv6Err),
-			)
+			var ipv4Response, ipv6Response *responseCodeError
+			if errors.As(ipv4Err, &ipv4Response) && errors.As(ipv6Err, &ipv6Response) &&
+				ipv4Response != nil && ipv6Response != nil && *ipv4Response == *ipv6Response {
+				return policy.ResolutionResult{}, fmt.Errorf("resolve A and AAAA records: %w", ipv4Err)
+			}
+
+			return policy.ResolutionResult{}, fmt.Errorf("resolve A and AAAA records: A: %w; AAAA: %w", ipv4Err, ipv6Err)
 		}
 
 		return combineResolutions(ipv4, ipv6), nil

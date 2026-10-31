@@ -1,4 +1,4 @@
-// Package cli parses the public airjail command line.
+// Package cli parses public flags and transports internal invocation settings.
 package cli
 
 import (
@@ -11,49 +11,12 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const (
-	SupervisorCommand                   = "__netns-supervisor"
-	RestrictedExecCommand               = "__restricted-exec"
-	RestrictedExecLogLevelOption        = "log-level"
-	SupervisorHTTPSocketOption          = "http-socket"
-	SupervisorSOCKSSocketOption         = "socks-socket"
-	SupervisorDNSSocketOption           = "dns-socket"
-	SupervisorPreservePermissionsOption = "preserve-permissions"
-	SupervisorRestrictSocketsOption     = "restrict-unix-sockets"
-	SupervisorKeepUnsafeCapability      = "keep-unsafe-capability"
-	SupervisorManageForegroundOption    = "manage-foreground"
-	SupervisorTransparentTCPOption      = "transparent-tcp"
-	SupervisorPrivateLoopbackOption     = "private-loopback"
-	SupervisorLogLevel                  = "log-level"
-)
-
 // Invocation contains effective configuration and the child command.
 type Invocation struct {
 	Config  config.Config
 	Command []string
 	Help    bool
 	Version bool
-}
-
-// RestrictedExecInvocation contains configuration for the hidden restricted-exec command.
-type RestrictedExecInvocation struct {
-	Command  []string
-	LogLevel string
-}
-
-// SupervisorInvocation contains configuration for the hidden namespace supervisor command.
-type SupervisorInvocation struct {
-	Command                []string
-	HTTPSocket             string
-	SOCKSocket             string
-	DNSSocket              string
-	LogLevel               string
-	PreservePermissions    bool
-	RestrictUnixSockets    bool
-	ManageForeground       bool
-	KeepUnsafeCapabilities []string
-	TransparentTCP         bool
-	PrivateLoopback        bool
 }
 
 type flagValues struct {
@@ -99,89 +62,6 @@ func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
 	flags.BoolVar(&values.version, "version", false, "Print version and exit")
 
 	return flags
-}
-
-// ParseSupervisor parses the hidden namespace supervisor command line.
-func ParseSupervisor(args []string) (SupervisorInvocation, error) {
-	flags := pflag.NewFlagSet(SupervisorCommand, pflag.ContinueOnError)
-	flags.SetInterspersed(false)
-	flags.SetOutput(io.Discard)
-
-	invocation := SupervisorInvocation{}
-	flags.StringVar(&invocation.HTTPSocket, SupervisorHTTPSocketOption, "", "outer HTTP proxy socket")
-	flags.StringVar(&invocation.SOCKSocket, SupervisorSOCKSSocketOption, "", "outer SOCKS proxy socket")
-	flags.StringVar(&invocation.DNSSocket, SupervisorDNSSocketOption, "", "outer DNS proxy socket")
-	flags.StringVar(&invocation.LogLevel, SupervisorLogLevel, "warning", "log level")
-	flags.BoolVar(
-		&invocation.PreservePermissions,
-		SupervisorPreservePermissionsOption,
-		false,
-		"preserve caller permissions",
-	)
-	flags.BoolVar(
-		&invocation.RestrictUnixSockets,
-		SupervisorRestrictSocketsOption,
-		false,
-		"restrict child local sockets",
-	)
-	flags.BoolVar(
-		&invocation.ManageForeground,
-		SupervisorManageForegroundOption,
-		false,
-		"manage the child terminal foreground process group",
-	)
-	flags.StringArrayVar(
-		&invocation.KeepUnsafeCapabilities,
-		SupervisorKeepUnsafeCapability,
-		nil,
-		"dangerous capability to preserve",
-	)
-	flags.BoolVar(
-		&invocation.TransparentTCP,
-		SupervisorTransparentTCPOption,
-		false,
-		"redirect non-proxy TCP connections",
-	)
-	flags.BoolVar(
-		&invocation.PrivateLoopback,
-		SupervisorPrivateLoopbackOption,
-		false,
-		"keep loopback connections in the child namespace",
-	)
-
-	err := flags.Parse(args)
-	if err != nil {
-		return SupervisorInvocation{}, fmt.Errorf("parse supervisor flags: %w", err)
-	}
-
-	invocation.Command = flags.Args()
-	if len(invocation.Command) == 0 {
-		return SupervisorInvocation{}, fmt.Errorf("supervisor child command is required")
-	}
-
-	return invocation, nil
-}
-
-// ParseRestrictedExec parses the hidden restricted-exec command line.
-func ParseRestrictedExec(args []string) (RestrictedExecInvocation, error) {
-	flags := pflag.NewFlagSet(RestrictedExecCommand, pflag.ContinueOnError)
-	flags.SetInterspersed(false)
-	flags.SetOutput(io.Discard)
-
-	invocation := RestrictedExecInvocation{}
-	flags.StringVar(&invocation.LogLevel, RestrictedExecLogLevelOption, "warning", "log level")
-
-	err := flags.Parse(args)
-	if err != nil {
-		return RestrictedExecInvocation{}, fmt.Errorf("parse restricted-exec flags: %w", err)
-	}
-
-	invocation.Command = flags.Args()
-	if len(invocation.Command) == 0 {
-		return RestrictedExecInvocation{}, fmt.Errorf("restricted child command is required")
-	}
-
-	return invocation, nil
 }
 
 // WriteHelp prints public command usage.

@@ -32,7 +32,7 @@ func run(ctx context.Context, args []string) (int, error) {
 		case cli.SupervisorCommand:
 			return runSupervisor(ctx, args[1:])
 		case cli.RestrictedExecCommand:
-			invocation, err := cli.ParseRestrictedExec(args[1:])
+			invocation, err := cli.DecodeRestrictedExec(args[1:])
 			if err != nil {
 				return 0, err
 			}
@@ -50,7 +50,7 @@ func run(ctx context.Context, args []string) (int, error) {
 }
 
 func runSupervisor(ctx context.Context, args []string) (int, error) {
-	invocation, err := cli.ParseSupervisor(args)
+	invocation, err := cli.DecodeSupervisor(args)
 	if err != nil {
 		return 0, err
 	}

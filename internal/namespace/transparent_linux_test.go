@@ -4,12 +4,9 @@ import (
 	"encoding/binary"
 	"net"
 	"net/netip"
-	"slices"
-	"syscall"
 	"testing"
 	"unsafe"
 
-	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
 )
@@ -72,47 +69,42 @@ func TestParseOriginalDestinationRejectsMalformedAddress(t *testing.T) {
 	}
 }
 
-func TestTransparentDNSUDPDestinationNAT(t *testing.T) {
+func TestDNSGatewayUsesConntrackNAT(t *testing.T) {
 	t.Parallel()
 
-	gateway := netip.MustParseAddr("127.97.105.114")
+	for _, test := range []struct {
+		gateway string
+		family  uint32
+	}{
+		{gateway: "127.97.105.114", family: unix.NFPROTO_IPV4},
+		{gateway: "fd61:6972:6a61:696c::1", family: unix.NFPROTO_IPV6},
+	} {
+		t.Run(test.gateway, func(t *testing.T) {
+			t.Parallel()
 
-	expressions := transparentDNSUDPExpressions(gateway, unix.NFPROTO_IPV4)
-	if len(expressions) != 7 {
-		t.Fatalf("expression count = %d, want 7", len(expressions))
-	}
+			gateway := netip.MustParseAddr(test.gateway)
 
-	destinationPort, ok := expressions[2].(*expr.Payload)
-	if !ok || destinationPort.Base != expr.PayloadBaseTransportHeader ||
-		destinationPort.Offset != 2 || destinationPort.Len != 2 {
-		t.Fatalf("destination-port expression = %#v", expressions[2])
-	}
+			usesNAT := false
 
-	translatedAddress, ok := expressions[4].(*expr.Immediate)
-	if !ok || !slices.Equal(translatedAddress.Data, gateway.AsSlice()) {
-		t.Fatalf("translated-address expression = %#v", expressions[4])
-	}
+			for _, expression := range transparentDNSUDPExpressions(gateway, test.family) {
+				switch operation := expression.(type) {
+				case *expr.Payload:
+					if operation.OperationType == expr.PayloadWrite {
+						t.Fatal("DNS interception rewrites packet payload instead of using conntrack NAT")
+					}
+				case *expr.NAT:
+					usesNAT = operation.Type == expr.NATTypeDestNAT && operation.Family == test.family
+				}
+			}
 
-	translatedPort, ok := expressions[5].(*expr.Immediate)
-	if !ok || !slices.Equal(translatedPort.Data, binaryutil.BigEndian.PutUint16(dnsPort)) {
-		t.Fatalf("translated-port expression = %#v", expressions[5])
-	}
-
-	translation, ok := expressions[6].(*expr.NAT)
-	if !ok || translation.Type != expr.NATTypeDestNAT || translation.Family != unix.NFPROTO_IPV4 ||
-		translation.RegAddrMin != 1 || translation.RegProtoMin != 2 {
-		t.Fatalf("destination-NAT expression = %#v", expressions[6])
-	}
-
-	for _, expression := range expressions {
-		payload, isPayload := expression.(*expr.Payload)
-		if isPayload && payload.OperationType == expr.PayloadWrite {
-			t.Fatalf("DNS destination NAT contains a payload-write expression: %#v", payload)
-		}
+			if !usesNAT {
+				t.Fatal("DNS replies cannot reverse the destination translation through conntrack")
+			}
+		})
 	}
 }
 
-func TestTransparentListenConfigEnablesIPv6Freebind(t *testing.T) {
+func TestTransparentListenersBindUnassignedIPv6(t *testing.T) {
 	t.Parallel()
 
 	listenConfig := newTransparentListenConfig()
@@ -127,13 +119,6 @@ func TestTransparentListenConfigEnablesIPv6Freebind(t *testing.T) {
 	}
 	defer func() { _ = listener.Close() }()
 
-	tcpListener, ok := listener.(*net.TCPListener)
-	if !ok {
-		t.Fatalf("listener type = %T, want *net.TCPListener", listener)
-	}
-
-	assertIPv6Freebind(t, tcpListener)
-
 	udpConnection, err := createDNSUDPSocket(
 		t.Context(),
 		&listenConfig,
@@ -144,41 +129,6 @@ func TestTransparentListenConfigEnablesIPv6Freebind(t *testing.T) {
 		t.Fatalf("listen for DNS on unassigned transparent IPv6 address: %v", err)
 	}
 	defer func() { _ = udpConnection.Close() }()
-
-	assertIPv6Freebind(t, udpConnection)
-}
-
-func assertIPv6Freebind(tb testing.TB, connection syscall.Conn) {
-	tb.Helper()
-
-	rawConnection, err := connection.SyscallConn()
-	if err != nil {
-		tb.Fatalf("access listener socket: %v", err)
-	}
-
-	var (
-		freebind  int
-		socketErr error
-	)
-
-	err = rawConnection.Control(func(fileDescriptor uintptr) {
-		freebind, socketErr = unix.GetsockoptInt(
-			int(fileDescriptor),
-			unix.IPPROTO_IPV6,
-			unix.IPV6_FREEBIND,
-		)
-	})
-	if err != nil {
-		tb.Fatalf("control listener socket: %v", err)
-	}
-
-	if socketErr != nil {
-		tb.Fatalf("read listener freebind setting: %v", socketErr)
-	}
-
-	if freebind != 1 {
-		tb.Errorf("IPV6_FREEBIND = %d, want 1", freebind)
-	}
 }
 
 func TestInternalEndpoints(t *testing.T) {

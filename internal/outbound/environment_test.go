@@ -1,14 +1,18 @@
+//nolint:goconst // Literal addresses make routing expectations explicit.
 package outbound
 
 import (
 	"bufio"
 	"context"
 	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 const deadProxyEnvironment = "HTTPS_PROXY=http://127.0.0.1:1"
@@ -19,6 +23,13 @@ func TestProxyAwareRouterConfiguredProxyTakesPrecedence(t *testing.T) {
 	listener := listenTCP(t)
 
 	requestDone := make(chan struct{})
+
+	t.Cleanup(func() {
+		_ = listener.Close()
+
+		<-requestDone
+	})
+
 	go func() {
 		defer close(requestDone)
 
@@ -29,6 +40,13 @@ func TestProxyAwareRouterConfiguredProxyTakesPrecedence(t *testing.T) {
 			return
 		}
 		defer func() { _ = connection.Close() }()
+
+		err = connection.SetDeadline(time.Now().Add(3 * time.Second))
+		if err != nil {
+			t.Errorf("set proxy deadline: %v", err)
+
+			return
+		}
 
 		reader := bufio.NewReader(connection)
 
@@ -94,6 +112,11 @@ func TestProxyAwareRouterConfiguredProxyTakesPrecedence(t *testing.T) {
 
 	defer func() { _ = connection.Close() }()
 
+	err = connection.SetDeadline(time.Now().Add(3 * time.Second))
+	if err != nil {
+		t.Fatalf("set tunnel deadline: %v", err)
+	}
+
 	payload := make([]byte, 5)
 
 	_, err = io.ReadFull(connection, payload)
@@ -108,90 +131,51 @@ func TestProxyAwareRouterConfiguredProxyTakesPrecedence(t *testing.T) {
 	<-requestDone
 }
 
-func TestProxyAwareRouterHonorsNoProxy(t *testing.T) {
+func TestProxyAwareRouterSelectsRoute(t *testing.T) {
 	t.Parallel()
 
-	target := listenTCP(t)
-	accepted := make(chan net.Conn, 1)
+	for _, test := range []struct {
+		name    string
+		noProxy string
+		address string
+		want    string
+	}{
+		{name: "proxy", address: "192.0.2.10", want: "127.0.0.1:1"},
+		{name: "hostname exclusion", noProxy: "service.example", address: "192.0.2.10", want: "192.0.2.10:443"},
+		{name: "unrelated exclusion", noProxy: "other.example", address: "192.0.2.10", want: "127.0.0.1:1"},
+		{name: "outer loopback", address: "127.0.0.1", want: "127.0.0.1:443"},
+		{name: "scoped IPv6", address: "fe80::1%lo", want: "[fe80::1%lo]:443"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	go func() {
-		connection, err := target.Accept()
-		if err == nil {
-			accepted <- connection
-		}
-	}()
+			router, err := NewProxyAwareRouter([]string{deadProxyEnvironment, "NO_PROXY=" + test.noProxy},
+				"", defaultConnectTimeout)
+			if err != nil {
+				t.Fatalf("create router: %v", err)
+			}
 
-	tcpAddress, ok := target.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("listener address has type %T, want *net.TCPAddr", target.Addr())
+			stopDial := errors.New("stop before connecting")
+			attempted := ""
+			// Observe the actual socket destination without accessing an external network.
+			router.dialer.Control = func(_, address string, _ syscall.RawConn) error {
+				attempted = address
+
+				return stopDial
+			}
+
+			connection, err := router.Dial(t.Context(), "service.example", netip.MustParseAddr(test.address), 443)
+			if connection != nil {
+				_ = connection.Close()
+
+				t.Fatal("dial unexpectedly connected")
+			}
+
+			if !errors.Is(err, stopDial) || attempted != test.want {
+				t.Fatalf("dial attempted %q, %v; want %q", attempted, err, test.want)
+			}
+		})
 	}
-
-	port := uint16(tcpAddress.Port)
-
-	router, err := NewProxyAwareRouter([]string{
-		deadProxyEnvironment,
-		"NO_PROXY=service.example",
-	}, "", defaultConnectTimeout)
-	if err != nil {
-		t.Fatalf("NewProxyAwareRouter: %v", err)
-	}
-
-	connection, err := router.Dial(
-		context.Background(),
-		"service.example",
-		netip.MustParseAddr("127.0.0.1"),
-		port,
-	)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-
-	defer func() { _ = connection.Close() }()
-
-	serverConnection := <-accepted
-	_ = serverConnection.Close()
-}
-
-func TestProxyAwareRouterAlwaysDialsLoopbackDirectly(t *testing.T) {
-	t.Parallel()
-
-	target := listenTCP(t)
-	accepted := make(chan net.Conn, 1)
-
-	go func() {
-		connection, err := target.Accept()
-		if err == nil {
-			accepted <- connection
-		}
-	}()
-
-	tcpAddress, ok := target.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("listener address has type %T, want *net.TCPAddr", target.Addr())
-	}
-
-	router, err := NewProxyAwareRouter(
-		[]string{deadProxyEnvironment},
-		"",
-		defaultConnectTimeout,
-	)
-	if err != nil {
-		t.Fatalf("NewProxyAwareRouter: %v", err)
-	}
-
-	connection, err := router.Dial(
-		context.Background(),
-		"",
-		netip.MustParseAddr("127.0.0.1"),
-		uint16(tcpAddress.Port),
-	)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
-	}
-	defer func() { _ = connection.Close() }()
-
-	serverConnection := <-accepted
-	_ = serverConnection.Close()
 }
 
 func TestProxyAwareRouterRejectsMalformedProxyURL(t *testing.T) {

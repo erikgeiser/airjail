@@ -208,15 +208,17 @@ func TestLegacyNumericHostnameRetainsTypeWhileExpanding(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if len(policy.allow.hosts) != 1 || policy.allow.hosts[0].hostname != "127.1" {
-		t.Fatalf("parsed hostname rules = %#v, want typed hostname 127.1", policy.allow.hosts)
+	allowed, err := policy.Allows("127.1", netip.Addr{}, 80)
+	if err != nil || !allowed {
+		t.Fatalf("numeric hostname match = %t, %v", allowed, err)
 	}
 
-	if len(policy.allow.addresses) != 0 {
-		t.Fatalf("explicit address rules = %#v, want none", policy.allow.addresses)
+	allowed, err = policy.Allows("127.0.0.1", netip.Addr{}, 80)
+	if err != nil || allowed {
+		t.Fatalf("numeric hostname was rewritten into a different name: %t, %v", allowed, err)
 	}
 
-	allowed, err := policy.Allows("", netip.MustParseAddr("127.0.0.1"), 80)
+	allowed, err = policy.Allows("", netip.MustParseAddr("127.0.0.1"), 80)
 	if err != nil {
 		t.Fatalf("Allows: %v", err)
 	}
@@ -257,9 +259,8 @@ func TestUnresolvedHostnamePolicy(t *testing.T) {
 		t.Fatalf("New with AllowUnresolved: %v", err)
 	}
 
-	wantWarning := "airjail: warning: hostname rule \"missing.example\" did not resolve: name not found\n"
-	if warningOutput.String() != wantWarning {
-		t.Fatalf("warning output = %q, want %q", warningOutput.String(), wantWarning)
+	if !strings.Contains(warningOutput.String(), "missing.example") {
+		t.Fatalf("missing unresolved-rule warning: %q", warningOutput.String())
 	}
 
 	allowed, err := policy.Allows("missing.example", netip.Addr{}, 443)
@@ -304,7 +305,7 @@ func TestStartupExpansionPreservesCompleteCNAMEChain(t *testing.T) {
 	}
 
 	for _, hostname := range []string{"example.com", "edge.cdn.test", "region.cdn.test"} {
-		allowed, allowErr := networkPolicy.Allows(hostname, netip.MustParseAddr("192.0.2.10"), 443)
+		allowed, allowErr := networkPolicy.Allows(hostname, netip.Addr{}, 443)
 		if allowErr != nil {
 			t.Fatalf("Allows(%s): %v", hostname, allowErr)
 		}
@@ -312,9 +313,14 @@ func TestStartupExpansionPreservesCompleteCNAMEChain(t *testing.T) {
 		if !allowed {
 			t.Errorf("CNAME chain hostname %s was not allowed", hostname)
 		}
+
+		addresses, found, snapshotErr := networkPolicy.StaticAddresses(hostname)
+		if snapshotErr != nil || !found || !slices.Equal(addresses, []netip.Addr{netip.MustParseAddr("192.0.2.10")}) {
+			t.Errorf("snapshot for %s = %v, %t, %v", hostname, addresses, found, snapshotErr)
+		}
 	}
 
-	allowed, err := networkPolicy.Allows("region.cdn.test", netip.MustParseAddr("192.0.2.10"), 80)
+	allowed, err := networkPolicy.Allows("region.cdn.test", netip.Addr{}, 80)
 	if err != nil {
 		t.Fatalf("Allows(other port): %v", err)
 	}
@@ -384,9 +390,8 @@ func TestHostnameExpansionIsLoggedAtInfoLevel(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	want := "expanded allow rule service.example:443 to 192.0.2.10:443"
-	if !strings.Contains(output.String(), want) {
-		t.Errorf("log output = %q, want it to contain %q", output.String(), want)
+	if !strings.Contains(output.String(), "service.example:443") || !strings.Contains(output.String(), "192.0.2.10:443") {
+		t.Errorf("expansion log lacks source or resolved destination: %q", output.String())
 	}
 }
 
@@ -409,7 +414,10 @@ func TestResolverResultsAreCanonicalizedAndDeduplicated(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	got := policy.allow.hosts[0].resolved
+	got, found, err := policy.StaticAddresses("service.example")
+	if err != nil || !found {
+		t.Fatalf("read snapshot: found=%t, error=%v", found, err)
+	}
 
 	want := []netip.Addr{netip.MustParseAddr("192.0.2.1")}
 	if !slices.Equal(got, want) {

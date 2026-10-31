@@ -38,8 +38,30 @@ func TestBidirectionalPreservesTCPHalfClose(t *testing.T) {
 	}
 	defer func() { _ = target.Close() }()
 
+	for _, connection := range []net.Conn{client, left, right, target} {
+		err = connection.SetDeadline(time.Now().Add(3 * time.Second))
+		if err != nil {
+			t.Fatalf("set relay test deadline: %v", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
 	relayDone := make(chan error, 1)
-	go func() { relayDone <- Bidirectional(context.Background(), left, left, right) }()
+
+	go func() {
+		defer close(relayDone)
+
+		relayDone <- Bidirectional(ctx, left, left, right)
+	}()
+
+	t.Cleanup(func() {
+		cancel()
+
+		_ = left.Close()
+		_ = right.Close()
+
+		<-relayDone
+	})
 
 	clientTCP, ok := client.(*net.TCPConn)
 	if !ok {

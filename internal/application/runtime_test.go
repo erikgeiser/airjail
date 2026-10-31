@@ -1,9 +1,11 @@
+//nolint:goconst // Literal proxy settings keep the expected environment explicit.
 package application
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
-	"slices"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +40,16 @@ func TestCreateAndClose(t *testing.T) {
 		t.Errorf("session permissions = %04o, want 0700", info.Mode().Perm())
 	}
 
+	sibling, err := createRuntimeDir(os.Getuid(), runtimeDirectory)
+	if err != nil {
+		t.Fatalf("create second session: %v", err)
+	}
+	defer func() { _ = sibling.Close() }()
+
+	if sibling.Directory == created.Directory {
+		t.Fatal("concurrent invocations share a session directory")
+	}
+
 	err = created.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
@@ -47,21 +59,67 @@ func TestCreateAndClose(t *testing.T) {
 	if !os.IsNotExist(err) {
 		t.Errorf("session still exists after Close: %v", err)
 	}
+
+	_, err = os.Stat(sibling.Directory)
+	if err != nil {
+		t.Errorf("closing one session removed another: %v", err)
+	}
 }
 
-func TestPrivateLoopbackChildEnvironment(t *testing.T) {
+func TestChildEnvironmentReplacesInheritedProxySettings(t *testing.T) {
 	t.Parallel()
 
-	environment := childEnvironment([]string{"PATH=/bin", "NO_PROXY=original"}, true, true)
+	proxyValues := map[string]string{
+		"HTTP_PROXY": "http://127.97.105.114:19080", "HTTPS_PROXY": "http://127.97.105.114:19080",
+		"GRPC_PROXY": "http://127.97.105.114:19080", "ALL_PROXY": "socks5h://127.97.105.114:19081",
+		"FTP_PROXY": "socks5h://127.97.105.114:19081", "NO_PROXY": "",
+	}
 
-	for _, expected := range []string{
-		"PATH=/bin",
-		"NO_PROXY=localhost,.localhost,127.0.0.1,127.0.0.0/8,::1",
-		"no_proxy=localhost,.localhost,127.0.0.1,127.0.0.0/8,::1",
+	for _, test := range []struct {
+		name    string
+		proxy   bool
+		private bool
+	}{
+		{name: "no egress"},
+		{name: "proxy mode", proxy: true},
+		{name: "private loopback", proxy: true, private: true},
 	} {
-		if !slices.Contains(environment, expected) {
-			t.Errorf("environment does not contain %q: %v", expected, environment)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			original := []string{"PATH=/bin", "KEEP=value=rest"}
+			want := map[string]string{"PATH": "/bin", "KEEP": "value=rest"}
+
+			for name, value := range proxyValues {
+				original = append(original, name+"=inherited", strings.ToLower(name)+"=inherited")
+
+				if !test.proxy {
+					continue
+				}
+
+				if name == "NO_PROXY" && test.private {
+					value = "localhost,.localhost,127.0.0.1,127.0.0.0/8,::1"
+				}
+
+				want[name] = value
+				want[strings.ToLower(name)] = value
+			}
+
+			got := make(map[string]string)
+
+			for _, entry := range childEnvironment(original, test.proxy, test.private) {
+				name, value, _ := strings.Cut(entry, "=")
+				if _, duplicate := got[name]; duplicate {
+					t.Errorf("duplicate environment variable %s", name)
+				}
+
+				got[name] = value
+			}
+
+			if !maps.Equal(got, want) {
+				t.Errorf("environment = %v, want %v", got, want)
+			}
+		})
 	}
 }
 

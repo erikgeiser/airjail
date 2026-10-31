@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/erikgeiser/airjail/internal/logging"
@@ -192,10 +193,10 @@ func TestParseRulesLogsCIDRNormalizationAtDebugLevel(t *testing.T) {
 
 	tests := []struct {
 		level string
-		want  string
+		want  bool
 	}{
 		{level: "info"},
-		{level: "debug", want: "airjail: debug: normalized CIDR \"10.1.2.3/8\" to \"10.0.0.0/8\"\n"},
+		{level: "debug", want: true},
 	}
 
 	for _, test := range tests {
@@ -214,8 +215,9 @@ func TestParseRulesLogsCIDRNormalizationAtDebugLevel(t *testing.T) {
 				t.Fatalf("parseRules: %v", err)
 			}
 
-			if output.String() != test.want {
-				t.Errorf("log output = %q, want %q", output.String(), test.want)
+			logged := strings.Contains(output.String(), "10.1.2.3/8") && strings.Contains(output.String(), "10.0.0.0/8")
+			if logged != test.want {
+				t.Errorf("normalization details logged = %t, want %t: %q", logged, test.want, output.String())
 			}
 		})
 	}

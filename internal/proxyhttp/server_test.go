@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -27,15 +26,28 @@ func (connector connectorFunc) Dial(
 	return connector(ctx, destination, port)
 }
 
-func TestConnectPreservesPipelinedNonTLSBytes(t *testing.T) {
+func TestConnectPipeliningAndActiveTunnelShutdown(t *testing.T) {
 	t.Parallel()
 
-	ctx := t.Context()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 
 	destinationListener := listenTCP(t)
 	destinationDone := make(chan error, 1)
+	releaseTarget := make(chan struct{})
+	targetStopped := make(chan struct{})
+
+	t.Cleanup(func() {
+		close(releaseTarget)
+
+		_ = destinationListener.Close()
+
+		<-targetStopped
+	})
 
 	go func() {
+		defer close(targetStopped)
+
 		connection, err := destinationListener.Accept()
 		if err != nil {
 			destinationDone <- err
@@ -56,6 +68,8 @@ func TestConnectPreservesPipelinedNonTLSBytes(t *testing.T) {
 		}
 
 		destinationDone <- err
+
+		<-releaseTarget
 	}()
 
 	connector := connectorFunc(func(ctx context.Context, _ policy.Destination, _ uint16) (net.Conn, error) {
@@ -70,6 +84,11 @@ func TestConnectPreservesPipelinedNonTLSBytes(t *testing.T) {
 		t.Fatalf("dial proxy: %v", err)
 	}
 	defer func() { _ = client.Close() }()
+
+	err = client.SetDeadline(time.Now().Add(3 * time.Second))
+	if err != nil {
+		t.Fatalf("set client deadline: %v", err)
+	}
 
 	_, err = client.Write([]byte("CONNECT example.test:22 HTTP/1.1\r\nHost: example.test:22\r\n\r\nping"))
 	if err != nil {
@@ -113,12 +132,23 @@ func TestConnectPreservesPipelinedNonTLSBytes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("destination server: %v", err)
 	}
+
+	cancel()
+
+	_, err = reader.ReadByte()
+	if !errors.Is(err, io.EOF) {
+		t.Errorf("tunnel after cancellation = %v, want EOF", err)
+	}
 }
 
 func TestPlainHTTPForwarding(t *testing.T) {
 	t.Parallel()
 
 	target := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/path" {
+			t.Errorf("forwarded request = %s %s", request.Method, request.URL.Path)
+		}
+
 		if request.Host != "service.test:8080" {
 			t.Errorf("Host = %q, want service.test:8080", request.Host)
 		}
@@ -136,7 +166,7 @@ func TestPlainHTTPForwarding(t *testing.T) {
 
 	connector := connectorFunc(func(ctx context.Context, destination policy.Destination, port uint16) (net.Conn, error) {
 		if destination.Hostname() != "service.test" || port != 8080 {
-			t.Fatalf("destination = %q:%d, want service.test:8080", destination.Hostname(), port)
+			return nil, errors.New("connector received a noncanonical destination")
 		}
 
 		return (&net.Dialer{}).DialContext(ctx, "tcp", targetURL.Host)
@@ -146,9 +176,9 @@ func TestPlainHTTPForwarding(t *testing.T) {
 	defer stopProxy()
 
 	proxyURL := &url.URL{Scheme: "http", Host: proxyAddress}
-	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}, Timeout: 3 * time.Second}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://service.test:8080/path", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://SERVICE.TEST.:8080/path", nil)
 	if err != nil {
 		t.Fatalf("create request: %v", err)
 	}
@@ -167,6 +197,39 @@ func TestPlainHTTPForwarding(t *testing.T) {
 
 	if string(body) != "forwarded" {
 		t.Errorf("response body = %q, want forwarded", body)
+	}
+}
+
+func TestMalformedTargetsNeverReachConnector(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		method string
+		target string
+	}{
+		{method: http.MethodConnect, target: "service.test:0"},
+		{method: http.MethodConnect, target: "service.test:99999"},
+		{method: http.MethodGet, target: "http://bad..test/"},
+		{method: http.MethodGet, target: "https://service.test/"},
+		{method: http.MethodGet, target: "http://user:secret@service.test/"},
+		{method: http.MethodGet, target: "/relative"},
+	} {
+		t.Run(test.target, func(t *testing.T) {
+			t.Parallel()
+
+			called := false
+			server := New(connectorFunc(func(context.Context, policy.Destination, uint16) (net.Conn, error) {
+				called = true
+
+				return nil, errors.New("unexpected connector call")
+			}))
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, httptest.NewRequestWithContext(t.Context(), test.method, test.target, nil))
+
+			if called || response.Code != http.StatusBadRequest {
+				t.Fatalf("malformed target: connector called=%t, status=%d", called, response.Code)
+			}
+		})
 	}
 }
 
@@ -205,6 +268,11 @@ func TestDeniedConnectReturnsForbidden(t *testing.T) {
 	}
 	defer func() { _ = connection.Close() }()
 
+	err = connection.SetDeadline(time.Now().Add(3 * time.Second))
+	if err != nil {
+		t.Fatalf("set client deadline: %v", err)
+	}
+
 	_, err = io.WriteString(connection, "CONNECT blocked.test:443 HTTP/1.1\r\nHost: blocked.test:443\r\n\r\n")
 	if err != nil {
 		t.Fatalf("write CONNECT: %v", err)
@@ -225,19 +293,22 @@ func startProxy(t *testing.T, ctx context.Context, server *Server) (string, func
 	t.Helper()
 
 	listener := listenTCP(t)
+	ctx, cancel := context.WithCancel(ctx)
 
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(ctx, listener) }()
 
 	return listener.Addr().String(), func() {
-		_ = listener.Close()
+		cancel()
 
 		select {
 		case err := <-serveDone:
-			if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+			if err != nil {
 				t.Errorf("serve proxy: %v", err)
 			}
 		case <-time.After(3 * time.Second):
+			_ = listener.Close()
+
 			t.Error("proxy did not stop")
 		}
 	}

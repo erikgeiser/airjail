@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -49,6 +50,8 @@ func TestResolverFollowsIncompleteCNAMEChain(t *testing.T) {
 		t.Fatalf("NewResolver: %v", err)
 	}
 
+	started := time.Now()
+
 	result, err := resolver.Resolve(t.Context(), "ip4", "example.com")
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -67,5 +70,9 @@ func TestResolverFollowsIncompleteCNAMEChain(t *testing.T) {
 	wantAddresses := []netip.Addr{netip.MustParseAddr("192.0.2.10")}
 	if !slices.Equal(result.Addresses, wantAddresses) {
 		t.Errorf("addresses = %v, want %v", result.Addresses, wantAddresses)
+	}
+
+	if result.ExpiresAt.Before(started.Add(20*time.Second)) || result.ExpiresAt.After(time.Now().Add(20*time.Second)) {
+		t.Errorf("expiration %s does not use the chain's minimum TTL of 20 seconds", result.ExpiresAt)
 	}
 }

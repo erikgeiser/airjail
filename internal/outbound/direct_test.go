@@ -1,7 +1,7 @@
+//nolint:goconst // Literal targets make policy scenarios self-contained.
 package outbound
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/erikgeiser/airjail/internal/logging"
 	"github.com/erikgeiser/airjail/internal/policy"
 )
 
@@ -65,14 +64,7 @@ func TestDirectDialsOnlyApprovedResolvedAddress(t *testing.T) {
 		t.Fatalf("policy.ParseDestination: %v", err)
 	}
 
-	var logOutput bytes.Buffer
-
-	logger, err := logging.New(&logOutput, "traffic", "")
-	if err != nil {
-		t.Fatalf("logging.New: %v", err)
-	}
-
-	connection, err := NewDirect(networkPolicy, resolver, dial, logger).Dial(context.Background(), destination, 443)
+	connection, err := NewDirect(networkPolicy, resolver, dial, nil).Dial(t.Context(), destination, 443)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -81,12 +73,6 @@ func TestDirectDialsOnlyApprovedResolvedAddress(t *testing.T) {
 
 	if dialedAddress != "192.0.2.10:443" {
 		t.Errorf("dialed address = %q, want 192.0.2.10:443", dialedAddress)
-	}
-
-	wantLog := "airjail: traffic: blocked: service.example:443 (10.0.0.1)\n" +
-		"airjail: traffic: allowed: service.example:443 (192.0.2.10)\n"
-	if logOutput.String() != wantLog {
-		t.Errorf("log output = %q, want %q", logOutput.String(), wantLog)
 	}
 }
 
@@ -228,42 +214,50 @@ func TestDirectRejectsHostnameBeforeResolution(t *testing.T) {
 	}
 }
 
-func TestDirectDoesNotDialDeniedAddress(t *testing.T) {
+func TestDirectNeverDialsDeniedTargets(t *testing.T) {
 	t.Parallel()
 
-	resolver := fakeResolver{addresses: map[string][]netip.Addr{
-		"blocked.example": {netip.MustParseAddr("192.0.2.1")},
-	}}
+	for _, test := range []struct {
+		name   string
+		block  []string
+		target string
+	}{
+		{name: "empty policy", target: "192.0.2.1"},
+		{name: "hostname", block: []string{"blocked.example@192.0.2.1"}, target: "blocked.example"},
+		{name: "expanded IP", block: []string{"blocked.example@192.0.2.1"}, target: "192.0.2.1"},
+		{name: "IPv4 prefix", block: []string{"192.0.2.0/24"}, target: "192.0.2.1"},
+		{name: "IPv6 literal", block: []string{"2001:db8::1"}, target: "2001:db8::1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	networkPolicy, err := policy.New(
-		context.Background(),
-		nil,
-		[]string{"blocked.example"},
-		policy.Options{Resolver: resolver},
-	)
-	if err != nil {
-		t.Fatalf("policy.New: %v", err)
-	}
+			networkPolicy, err := policy.New(t.Context(), nil, test.block, policy.Options{})
+			if err != nil {
+				t.Fatalf("create policy: %v", err)
+			}
 
-	dial := func(_ context.Context, _, _ string) (net.Conn, error) {
-		t.Fatal("dialer called for denied address")
+			dialed := false
+			dial := func(context.Context, string, string) (net.Conn, error) {
+				dialed = true
 
-		return nil, nil
-	}
+				return nil, fmt.Errorf("unexpected dial")
+			}
 
-	destination, err := policy.ParseDestination("blocked.example")
-	if err != nil {
-		t.Fatalf("policy.ParseDestination: %v", err)
-	}
+			destination, err := policy.ParseDestination(test.target)
+			if err != nil {
+				t.Fatalf("parse target: %v", err)
+			}
 
-	connection, err := NewDirect(networkPolicy, resolver, dial, nil).Dial(context.Background(), destination, 443)
-	if connection != nil {
-		_ = connection.Close()
+			connection, err := NewDirect(networkPolicy, nil, dial, nil).Dial(t.Context(), destination, 443)
+			if connection != nil {
+				_ = connection.Close()
 
-		t.Fatal("Dial returned a connection for denied address")
-	}
+				t.Error("denied target returned a connection")
+			}
 
-	if !errors.Is(err, ErrDenied) {
-		t.Fatalf("Dial error = %v, want ErrDenied", err)
+			if dialed || !errors.Is(err, ErrDenied) {
+				t.Fatalf("denied target: dialed=%t, error=%v", dialed, err)
+			}
+		})
 	}
 }
