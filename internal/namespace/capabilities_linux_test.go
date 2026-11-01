@@ -78,5 +78,4 @@ func TestSelectUnsafeCapabilitiesRejectsCapabilitiesCallerDoesNotHave(t *testing
 	if len(kept) != 0 {
 		t.Errorf("kept capabilities = %v, want none", kept)
 	}
-
 }

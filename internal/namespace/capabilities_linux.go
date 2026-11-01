@@ -100,7 +100,7 @@ func parseUnsafeCapabilities(requested []string) ([]dangerousCapability, error) 
 
 		capability, found := capabilitiesByName[name]
 		if !found {
-			return nil, fmt.Errorf("unsafe capability %q is not dropped by airjail", rawName)
+			return nil, fmt.Errorf("capability %q is was not recognized", rawName)
 		}
 
 		_, found = seen[capability.value]

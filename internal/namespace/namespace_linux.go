@@ -8,6 +8,8 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"slices"
+	"strings"
 	"syscall"
 
 	"github.com/erikgeiser/airjail/internal/cli"
@@ -501,7 +503,14 @@ func dropSetupCapabilities() error {
 
 func prepareChildCapabilities(options SupervisorOptions) (*syscall.SysProcAttr, error) {
 	if !options.PreservePermissions {
-		return nil, dropSetupCapabilities()
+		err := dropSetupCapabilities()
+		if err != nil {
+			return nil, err
+		}
+
+		options.Logger.Debugf("dropped all capabilities from effective, permitted, inheritable, ambient, and bounding sets")
+
+		return nil, nil
 	}
 
 	err := dropDangerousCapabilities(options.KeepUnsafeCapabilities)
@@ -513,6 +522,15 @@ func prepareChildCapabilities(options SupervisorOptions) (*syscall.SysProcAttr, 
 	if err != nil {
 		return nil, err
 	}
+
+	dropped := make([]string, 0, len(dangerousCapabilities))
+	for _, capability := range dangerousCapabilities {
+		if !slices.Contains(ambientCapabilities, uintptr(capability.value)) {
+			dropped = append(dropped, capability.name)
+		}
+	}
+
+	options.Logger.Debugf("dropped capabilities: %s", strings.Join(dropped, ", "))
 
 	return &syscall.SysProcAttr{AmbientCaps: ambientCapabilities}, nil
 }
