@@ -30,7 +30,9 @@ type flagValues struct {
 	allowArbitraryDNS          bool
 	disableTransparentFallback bool
 	privateLoopback            bool
-	restrictUnixSockets        bool
+	allowSockets               []string
+	allowAllSockets            bool
+	allowVSocks                bool
 	keepUnsafeCapabilities     []string
 	version                    bool
 }
@@ -55,8 +57,11 @@ func newFlagSet(output io.Writer, values *flagValues) *pflag.FlagSet {
 		"Disable transparent TCP and DNS interception")
 	flags.BoolVar(&values.privateLoopback, "private-loopback", false,
 		"Keep loopback connections inside the child network namespace")
-	flags.BoolVar(&values.restrictUnixSockets, "restrict-sockets", false,
-		"Restrict access to Unix and vsock sockets")
+	flags.StringArrayVar(&values.allowSockets, "allow-socket", nil,
+		"Allow access to an existing Unix socket `path` (repeatable; requires Landlock ABI 9)")
+	flags.BoolVar(&values.allowAllSockets, "allow-all-sockets", false,
+		"Allow access to all Unix sockets (not vsock)")
+	flags.BoolVar(&values.allowVSocks, "allow-vsocks", false, "Allow vsock sockets")
 	flags.StringArrayVar(&values.keepUnsafeCapabilities, "keep-unsafe-capability", nil,
 		"Preserve an otherwise dropped dangerous `capability` (repeatable)")
 	flags.BoolVar(&values.version, "version", false, "Print version and exit")
@@ -143,8 +148,14 @@ func Parse(args []string) (Invocation, error) {
 		effective.PrivateLoopback = values.privateLoopback
 	}
 
-	if flags.Changed("restrict-sockets") {
-		effective.RestrictUnixSockets = values.restrictUnixSockets
+	effective.AllowSockets = append(effective.AllowSockets, values.allowSockets...)
+
+	if flags.Changed("allow-all-sockets") {
+		effective.AllowAllSockets = values.allowAllSockets
+	}
+
+	if flags.Changed("allow-vsocks") {
+		effective.AllowVSocks = values.allowVSocks
 	}
 
 	command := flags.Args()

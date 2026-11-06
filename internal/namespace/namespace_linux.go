@@ -77,7 +77,9 @@ type ParentOptions struct {
 	SOCKSocket             string
 	DNSSocket              string
 	Mode                   Mode
-	RestrictUnixSockets    bool
+	AllowSockets           []string
+	AllowAllSockets        bool
+	AllowVSocks            bool
 	KeepUnsafeCapabilities []string
 	TransparentTCP         bool
 	PrivateLoopback        bool
@@ -115,7 +117,9 @@ func Run(ctx context.Context, options ParentOptions) (int, error) {
 		DNSSocket:              options.DNSSocket,
 		LogLevel:               options.Logger.LevelName(),
 		PreservePermissions:    options.Mode == PermissionPreservingMode,
-		RestrictUnixSockets:    options.RestrictUnixSockets,
+		AllowSockets:           options.AllowSockets,
+		AllowAllSockets:        options.AllowAllSockets,
+		AllowVSocks:            options.AllowVSocks,
 		ManageForeground:       ownsTerminalForeground(terminal, foregroundProcessGroup, unix.Getpgrp()),
 		KeepUnsafeCapabilities: keptCapabilities,
 		TransparentTCP:         options.TransparentTCP,
@@ -200,7 +204,9 @@ type SupervisorOptions struct {
 	SOCKSocket             string
 	DNSSocket              string
 	PreservePermissions    bool
-	RestrictUnixSockets    bool
+	AllowSockets           []string
+	AllowAllSockets        bool
+	AllowVSocks            bool
 	ManageForeground       bool
 	KeepUnsafeCapabilities []string
 	TransparentTCP         bool
@@ -375,7 +381,7 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 		defer cancel()
 
 		command := options.Command
-		if options.RestrictUnixSockets {
+		if requiresSocketRestrictions(options.AllowAllSockets, options.AllowVSocks) {
 			executable, executableErr := os.Executable()
 			if executableErr != nil {
 				childErr = fmt.Errorf("locate airjail executable for restricted child: %w", executableErr)
@@ -383,7 +389,11 @@ func RunSupervisor(ctx context.Context, options SupervisorOptions) (int, error) 
 				return nil
 			}
 
-			invocation := cli.RestrictedExecInvocation{Command: command, LogLevel: options.Logger.LevelName()}
+			invocation := cli.RestrictedExecInvocation{
+				Command: command, LogLevel: options.Logger.LevelName(),
+				AllowSockets: options.AllowSockets, AllowAllSockets: options.AllowAllSockets,
+				AllowVSocks: options.AllowVSocks,
+			}
 
 			args, encodeErr := invocation.Args()
 			if encodeErr != nil {

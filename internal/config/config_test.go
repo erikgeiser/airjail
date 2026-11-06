@@ -22,7 +22,9 @@ transparent_fallback: false
 private_loopback: true
 allow_unresolved_rules: true
 allow_arbitrary_dns: true
-restrict_sockets: true
+allow_sockets: [/run/allowed.sock]
+allow_all_sockets: true
+allow_vsocks: true
 keep_unsafe_capabilities: [CAP_SYS_ADMIN]
 `)
 
@@ -67,8 +69,9 @@ keep_unsafe_capabilities: [CAP_SYS_ADMIN]
 		t.Error("AllowArbitraryDNS = false, want true")
 	}
 
-	if !loaded.RestrictUnixSockets {
-		t.Error("RestrictUnixSockets = false, want true")
+	if !loaded.AllowAllSockets || !loaded.AllowVSocks || len(loaded.AllowSockets) != 1 ||
+		loaded.AllowSockets[0] != "/run/allowed.sock" {
+		t.Errorf("socket permissions = %#v", loaded)
 	}
 
 	if len(loaded.KeepUnsafeCapabilities) != 1 || loaded.KeepUnsafeCapabilities[0] != "CAP_SYS_ADMIN" {
@@ -97,6 +100,7 @@ func TestLoadRejectsAmbiguousOrInvalidConfig(t *testing.T) {
 		yaml string
 	}{
 		{name: "unknown field", yaml: "unknown: true\n"},
+		{name: "removed socket option", yaml: "restrict_sockets: true\n"},
 		{name: "multiple documents", yaml: "allow: [first.test]\n---\nallow: [second.test]\n"},
 		{name: "duplicate key", yaml: "allow: [first.test]\nallow: [second.test]\n"},
 		{name: "malformed YAML", yaml: "allow: [unterminated\n"},

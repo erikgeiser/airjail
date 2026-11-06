@@ -26,8 +26,8 @@ It follows these design principles:
   isolation. All other isolation types are well served by tools such as
   `firejail` or `bubblewrap` and both of these tools can be combined with
   `airjail` for exhaustive sandboxing. The only exception in `airjail` is
-  blocking access to Unix domain and vsock sockets, which is an opt-in feature
-  intended as support for the actual network isolation in certain scenarios.
+  restricting access to external Unix domain and vsock sockets by default to
+  prevent local services from bypassing network isolation.
 - **Transparent:** `airjail` aims to act like a transparent shim that interferes
   with the execution of the program as little as possible. It is therefore
   designed to provide the same experience regarding
@@ -79,7 +79,7 @@ Each rule can reference destinations in multiple ways:
 
 **Local Sockets:**
 
-Airjail can optionally restrict Unix domain and vsock sockets. While Unix
+Airjail restricts external Unix domain and vsock sockets by default. While Unix
 sockets are local IPC rather than network access, they can often be used to
 circumvent network restrictions. Vsock can similarly reach host or hypervisor
 services without traversing the network namespace. For example, when SSH is used
@@ -87,12 +87,23 @@ with the `ControlMaster` feature on the host, network isolated processes could
 connect to the `ControlMaster` socket in order to SSH into machines through an
 existing connection that was established outside of the network isolation.
 
-On systems with Landlock ABI 9 or newer, `--restrict-sockets` denies connections
+On systems with Landlock ABI 9 or newer, airjail denies connections
 to pathname and abstract Unix sockets created outside the sandbox while allowing
 Unix sockets and socket pairs created by the sandboxed process and its
 descendants. Vsock remains unavailable. If this Landlock support is unavailable,
 airjail emits a warning and falls back to denying all Unix and vsock socket
-creation. The feature remains opt-in. Alternatively, `airjail` can be used
+creation. Use repeatable `--allow-socket /path/to/socket` options to allow
+specific existing pathname Unix sockets. Relative paths are resolved from the
+invocation's working directory, and symlinks are followed. Without suitable
+Landlock support, airjail warns that these exceptions cannot be honored and
+continues denying Unix socket creation.
+
+`--allow-all-sockets` allows all Unix sockets, including on fallback systems,
+but does not allow vsock. Use `--allow-vsocks` independently to allow vsock.
+These permissions can also be configured with `allow_sockets`,
+`allow_all_sockets`, and `allow_vsocks` in YAML.
+
+Alternatively, `airjail` can be used
 together with `firejail`, `bubblewrap` or a container to remove dangerous
 sockets from the filesystem.
 
@@ -124,7 +135,7 @@ separated with `--` for clarity. The following two invocations are identical:
 $ airjail \
     --allow "127.0.0.1/8" --allow "example.com" --allow '*.example.com' \
     --block "bad.example.com" --block "127.0.0.1:53" \
-    --restrict-sockets --disable-transparent-fallback --private-loopback \
+    --disable-transparent-fallback --private-loopback \
     program -flag-a arg-b
 $ airjail --config airjail.yml -- program -flag-a arg-b
 ```
@@ -140,7 +151,9 @@ block:
   - "bad.example.com"
   - "127.0.0.1:53"
 log: warning
-restrict_sockets: true
+allow_sockets: []
+allow_all_sockets: false
+allow_vsocks: false
 allow_unresolved_rules: false
 allow_arbitrary_dns: false
 proxy: http://proxy.example:8080
@@ -231,11 +244,12 @@ locked OS thread, because Linux capability sets and `no_new_privs` are
 thread-local. That thread is retired when its goroutine exits rather than reused
 for other work.
 
-The opt-in feature to restrict local sockets loads `seccomp` `BPF` rules that
-are assembled in pure Go. These rules restrict access to the syscalls `socket`
-and `socketpair` when called with `AF_UNIX` or `AF_VSOCK`. It also restricts
-`io_uring_setup` and the legacy syscall `socketcall`, as these could also be
-used to establish domain socket connections. It also forbids 32-bit syscalls.
+Local socket isolation uses Landlock ABI 9 to restrict external Unix sockets,
+with explicit pathname exceptions. Pure-Go seccomp BPF filters deny vsock and,
+when suitable Landlock support is unavailable, Unix socket creation. While
+seccomp socket restrictions are needed, airjail also denies `io_uring_setup`,
+non-native syscall architectures, and the legacy `socketcall` on 386. When no
+socket restriction requires seccomp, these filters are omitted.
 
 ## Why airjail and not firejail, bubblewrap or sandbox-runtime?
 

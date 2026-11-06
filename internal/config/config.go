@@ -24,7 +24,9 @@ type Config struct {
 	ConnectTimeout         time.Duration `yaml:"connect_timeout"`
 	TransparentFallback    bool          `yaml:"transparent_fallback"`
 	PrivateLoopback        bool          `yaml:"private_loopback"`
-	RestrictUnixSockets    bool          `yaml:"restrict_sockets"`
+	AllowSockets           []string      `yaml:"allow_sockets"`
+	AllowAllSockets        bool          `yaml:"allow_all_sockets"`
+	AllowVSocks            bool          `yaml:"allow_vsocks"`
 	AllowUnresolvedRules   bool          `yaml:"allow_unresolved_rules"`
 	AllowArbitraryDNS      bool          `yaml:"allow_arbitrary_dns"`
 	KeepUnsafeCapabilities []string      `yaml:"keep_unsafe_capabilities"`

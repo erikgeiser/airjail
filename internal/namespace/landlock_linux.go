@@ -46,7 +46,39 @@ func landlockUnavailable(err error) bool {
 	return errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP)
 }
 
-func restrictExternalUnixSockets() error {
+func allowUnixSocket(ruleset int, path string) error {
+	fileDescriptor, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open allowed Unix socket %q: %w", path, err)
+	}
+	defer func() { _ = unix.Close(fileDescriptor) }()
+
+	var stat unix.Stat_t
+
+	err = unix.Fstat(fileDescriptor, &stat)
+	if err != nil {
+		return fmt.Errorf("inspect allowed Unix socket %q: %w", path, err)
+	}
+
+	if stat.Mode&unix.S_IFMT != unix.S_IFSOCK {
+		return fmt.Errorf("allowed Unix socket %q is not a socket", path)
+	}
+
+	attributes := unix.LandlockPathBeneathAttr{
+		Allowed_access: landlockAccessFSResolveUnix,
+		Parent_fd:      int32(fileDescriptor),
+	}
+
+	_, _, errno := unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, uintptr(ruleset),
+		unix.LANDLOCK_RULE_PATH_BENEATH, uintptr(unsafe.Pointer(&attributes)), 0, 0, 0)
+	if errno != 0 {
+		return fmt.Errorf("allow Unix socket %q through Landlock: %w", path, errno)
+	}
+
+	return nil
+}
+
+func restrictExternalUnixSockets(socketPaths []string) error {
 	attributes := landlockRulesetAttr{
 		handledAccessFS: landlockAccessFSResolveUnix,
 		scoped:          unix.LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
@@ -67,6 +99,13 @@ func restrictExternalUnixSockets() error {
 
 	fileDescriptor := int(ruleset)
 	defer func() { _ = unix.Close(fileDescriptor) }()
+
+	for _, path := range socketPaths {
+		err := allowUnixSocket(fileDescriptor, path)
+		if err != nil {
+			return err
+		}
+	}
 
 	_, _, errno = unix.Syscall(
 		unix.SYS_LANDLOCK_RESTRICT_SELF,

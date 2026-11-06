@@ -13,8 +13,11 @@ const (
 
 // RestrictedExecInvocation carries only settings needed by the socket-restricted child.
 type RestrictedExecInvocation struct {
-	Command  []string `json:"-"`
-	LogLevel string   `json:"log_level"`
+	Command         []string `json:"-"`
+	LogLevel        string   `json:"log_level"`
+	AllowSockets    []string `json:"allow_sockets"`
+	AllowAllSockets bool     `json:"allow_all_sockets"`
+	AllowVSocks     bool     `json:"allow_vsocks"`
 }
 
 // SupervisorInvocation carries effective child settings and supervisor runtime decisions.
@@ -26,7 +29,9 @@ type SupervisorInvocation struct {
 	DNSSocket              string   `json:"dns_socket"`
 	LogLevel               string   `json:"log_level"`
 	PreservePermissions    bool     `json:"preserve_permissions"`
-	RestrictUnixSockets    bool     `json:"restrict_unix_sockets"`
+	AllowSockets           []string `json:"allow_sockets"`
+	AllowAllSockets        bool     `json:"allow_all_sockets"`
+	AllowVSocks            bool     `json:"allow_vsocks"`
 	ManageForeground       bool     `json:"manage_foreground"`
 	KeepUnsafeCapabilities []string `json:"keep_unsafe_capabilities"`
 	TransparentTCP         bool     `json:"transparent_tcp"`

@@ -151,7 +151,7 @@ func TestExecRestrictedProcess(t *testing.T) {
 			os.Exit(2)
 		}
 
-		err = ExecRestricted([]string{os.Args[0], fmt.Sprintf("-test.run=^%s$", t.Name())}, logger)
+		err = ExecRestricted([]string{os.Args[0], fmt.Sprintf("-test.run=^%s$", t.Name())}, SocketOptions{}, logger)
 		fmt.Fprintf(os.Stderr, "ExecRestricted: %v\n", err)
 		os.Exit(2)
 	case "check":

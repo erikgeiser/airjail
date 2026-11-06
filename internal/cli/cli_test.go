@@ -25,6 +25,10 @@ func TestParseStopsAtChildCommand(t *testing.T) {
 		t.Error("TransparentFallback = false, want default true")
 	}
 
+	if invocation.Config.AllowAllSockets || invocation.Config.AllowVSocks || len(invocation.Config.AllowSockets) != 0 {
+		t.Error("default invocation permits external sockets")
+	}
+
 	wantCommand := []string{"curl", "-v", "https://example.com"}
 	if !slices.Equal(invocation.Command, wantCommand) {
 		t.Errorf("Command = %v, want %v", invocation.Command, wantCommand)
@@ -59,7 +63,9 @@ transparent_fallback: false
 private_loopback: true
 allow_unresolved_rules: true
 allow_arbitrary_dns: true
-restrict_sockets: true
+allow_sockets: [/run/config.sock]
+allow_all_sockets: true
+allow_vsocks: true
 keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 `)
 
@@ -89,7 +95,9 @@ keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 		"--allow-arbitrary-dns=false",
 		"--disable-transparent-fallback=false",
 		"--private-loopback=false",
-		"--restrict-sockets=false",
+		"--allow-socket", "/run/cli.sock",
+		"--allow-all-sockets=false",
+		"--allow-vsocks=false",
 		"--keep-unsafe-capability", "CAP_SYS_ADMIN",
 		"command",
 	})
@@ -133,8 +141,12 @@ keep_unsafe_capabilities: [CAP_SYS_PTRACE]
 		t.Error("PrivateLoopback = true, want CLI override false")
 	}
 
-	if invocation.Config.RestrictUnixSockets {
-		t.Error("RestrictUnixSockets = true, want CLI override false")
+	if invocation.Config.AllowAllSockets || invocation.Config.AllowVSocks {
+		t.Error("socket permissions = true, want CLI overrides false")
+	}
+
+	if !slices.Equal(invocation.Config.AllowSockets, []string{"/run/config.sock", "/run/cli.sock"}) {
+		t.Errorf("AllowSockets = %v", invocation.Config.AllowSockets)
 	}
 
 	wantCapabilities := []string{"CAP_SYS_PTRACE", "CAP_SYS_ADMIN"}
@@ -157,6 +169,15 @@ func TestParseDisablesTransparentFallback(t *testing.T) {
 
 	if invocation.Config.TransparentFallback {
 		t.Error("TransparentFallback = true, want false")
+	}
+}
+
+func TestParseRejectsRemovedSocketOption(t *testing.T) {
+	t.Parallel()
+
+	_, err := Parse([]string{"--restrict-sockets", "command"})
+	if err == nil {
+		t.Fatal("removed --restrict-sockets flag was accepted")
 	}
 }
 

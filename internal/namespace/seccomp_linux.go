@@ -12,9 +12,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ExecRestricted installs the optional child seccomp filter and replaces the
-// current process with command.
-func ExecRestricted(command []string, logger *logging.Logger) error {
+// SocketOptions controls exceptions to the child's local socket restrictions.
+type SocketOptions struct {
+	AllowSockets    []string
+	AllowAllSockets bool
+	AllowVSocks     bool
+}
+
+func requiresSocketRestrictions(allowAllSockets, allowVSocks bool) bool {
+	return !allowAllSockets || !allowVSocks
+}
+
+// ExecRestricted installs child socket restrictions and replaces the current process with command.
+func ExecRestricted(command []string, options SocketOptions, logger *logging.Logger) error {
 	if len(command) == 0 {
 		return fmt.Errorf("restricted child command is required")
 	}
@@ -24,24 +34,22 @@ func ExecRestricted(command []string, logger *logging.Logger) error {
 		return fmt.Errorf("look up restricted command %q: %w", command[0], err)
 	}
 
-	abi, err := landlockABIVersion()
-	landlockEnabled := err == nil && landlockUnixSocketsAvailable(abi, runtime.GOARCH)
+	landlockEnabled := false
 
-	switch {
-	case err != nil && !landlockUnavailable(err):
-		return fmt.Errorf("restrict local sockets: %w", err)
-	case err != nil:
-		logger.Debugf("landlock is unavailable: %v", err)
-	case abi < landlockUnixSocketABI:
-		logger.Debugf("landlock ABI %d does not support pathname Unix socket isolation", abi)
-	case !landlockEnabled:
-		logger.Debugf("landlock unix socket isolation is unavailable on %s", runtime.GOARCH)
-	}
+	if !options.AllowAllSockets {
+		abi, abiErr := landlockABIVersion()
+		if abiErr != nil && !landlockUnavailable(abiErr) {
+			return fmt.Errorf("restrict local sockets: %w", abiErr)
+		}
 
-	if !landlockEnabled {
-		logger.Warnf("landlock unix socket isolation is unavailable, denying all unix and vsock socket creation")
-	} else {
-		logger.Debugf("installing landlock unix socket isolation")
+		landlockEnabled = abiErr == nil && landlockUnixSocketsAvailable(abi, runtime.GOARCH)
+		if !landlockEnabled {
+			logger.Warnf("landlock unix socket isolation is unavailable, restricting all unix sockets")
+
+			if len(options.AllowSockets) != 0 {
+				logger.Warnf("--allow-socket requires Landlock ABI 9")
+			}
+		}
 	}
 
 	// no_new_privs is per-thread until Landlock and seccomp synchronize the
@@ -56,20 +64,25 @@ func ExecRestricted(command []string, logger *logging.Logger) error {
 	}
 
 	if landlockEnabled {
-		err = restrictExternalUnixSockets()
+		err = restrictExternalUnixSockets(options.AllowSockets)
 		if err != nil {
 			return fmt.Errorf("restrict local sockets: %w", err)
 		}
 	}
 
-	err = loadNativeArchitectureGuard()
-	if err != nil {
-		return fmt.Errorf("restrict local sockets: %w", err)
-	}
+	denyUnixSockets := !options.AllowAllSockets && !landlockEnabled
 
-	err = seccomp.LoadFilter(restrictedSocketFilter(!landlockEnabled))
-	if err != nil {
-		return fmt.Errorf("restrict local sockets: %w", err)
+	denyVSocks := !options.AllowVSocks
+	if denyUnixSockets || denyVSocks {
+		err = loadNativeArchitectureGuard()
+		if err != nil {
+			return fmt.Errorf("restrict local sockets: %w", err)
+		}
+
+		err = seccomp.LoadFilter(restrictedSocketFilter(denyUnixSockets, denyVSocks))
+		if err != nil {
+			return fmt.Errorf("restrict local sockets: %w", err)
+		}
 	}
 
 	logger.Debugf("starting process in sandbox: %s", strings.Join(command, ", "))
@@ -82,7 +95,7 @@ func ExecRestricted(command []string, logger *logging.Logger) error {
 	return nil
 }
 
-func restrictedSocketFilter(denyUnixSockets bool) seccomp.Filter {
+func restrictedSocketFilter(denyUnixSockets, denyVSocks bool) seccomp.Filter {
 	blockedSyscalls := []string{
 		// io_uring can create sockets without invoking the socket syscall.
 		"io_uring_setup",
@@ -93,7 +106,11 @@ func restrictedSocketFilter(denyUnixSockets bool) seccomp.Filter {
 		blockedSyscalls = append(blockedSyscalls, "socketcall")
 	}
 
-	restrictedFamilies := []uint64{unix.AF_VSOCK}
+	restrictedFamilies := []uint64{}
+	if denyVSocks {
+		restrictedFamilies = append(restrictedFamilies, unix.AF_VSOCK)
+	}
+
 	if denyUnixSockets {
 		restrictedFamilies = append(restrictedFamilies, unix.AF_UNIX)
 	}

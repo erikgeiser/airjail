@@ -42,7 +42,10 @@ func run(ctx context.Context, args []string) (int, error) {
 				return 0, fmt.Errorf("setup restricted-exec logger: %w", err)
 			}
 
-			return 0, namespace.ExecRestricted(invocation.Command, logger)
+			return 0, namespace.ExecRestricted(invocation.Command, namespace.SocketOptions{
+				AllowSockets: invocation.AllowSockets, AllowAllSockets: invocation.AllowAllSockets,
+				AllowVSocks: invocation.AllowVSocks,
+			}, logger)
 		}
 	}
 
@@ -80,7 +83,9 @@ func runSupervisor(ctx context.Context, args []string) (int, error) {
 		SOCKSocket:             invocation.SOCKSocket,
 		DNSSocket:              invocation.DNSSocket,
 		PreservePermissions:    invocation.PreservePermissions,
-		RestrictUnixSockets:    invocation.RestrictUnixSockets,
+		AllowSockets:           invocation.AllowSockets,
+		AllowAllSockets:        invocation.AllowAllSockets,
+		AllowVSocks:            invocation.AllowVSocks,
 		ManageForeground:       invocation.ManageForeground,
 		KeepUnsafeCapabilities: invocation.KeepUnsafeCapabilities,
 		TransparentTCP:         invocation.TransparentTCP,

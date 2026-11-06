@@ -17,11 +17,13 @@ func TestSupervisorJSONSettingsAndNativeArgv(t *testing.T) {
 		strings.Repeat("x", 70_000), strings.Repeat("y", 70_000)}
 	wire := `{"http_socket":"/run/session space/http.sock","socks_socket":"/run/socks.sock",
 		"dns_socket":"/run/dns.sock","log_level":"debug","preserve_permissions":true,
-		"restrict_unix_sockets":true,"manage_foreground":true,"keep_unsafe_capabilities":["CAP_NET_ADMIN"],
+		"allow_sockets":["/run/allowed.sock"],"allow_all_sockets":true,"allow_vsocks":true,
+		"manage_foreground":true,"keep_unsafe_capabilities":["CAP_NET_ADMIN"],
 		"transparent_tcp":true,"transparent_ipv6":true,"private_loopback":true}`
 	want := SupervisorInvocation{
 		Command: command, HTTPSocket: "/run/session space/http.sock", SOCKSocket: "/run/socks.sock",
-		DNSSocket: "/run/dns.sock", LogLevel: "debug", PreservePermissions: true, RestrictUnixSockets: true,
+		DNSSocket: "/run/dns.sock", LogLevel: "debug", PreservePermissions: true,
+		AllowSockets: []string{"/run/allowed.sock"}, AllowAllSockets: true, AllowVSocks: true,
 		ManageForeground: true, KeepUnsafeCapabilities: []string{"CAP_NET_ADMIN"},
 		TransparentTCP: true, TransparentIPv6: true, PrivateLoopback: true,
 	}
@@ -49,9 +51,15 @@ func TestSupervisorJSONSettingsAndNativeArgv(t *testing.T) {
 func TestRestrictedExecJSONSettingsAndNativeArgv(t *testing.T) {
 	t.Parallel()
 
-	want := RestrictedExecInvocation{Command: []string{"child", "--log-level", "", string([]byte{0xff})}, LogLevel: "debug"}
+	want := RestrictedExecInvocation{
+		Command: []string{"child", "--log-level", "", string([]byte{0xff})}, LogLevel: "debug",
+		AllowSockets: []string{"/run/allowed.sock"}, AllowAllSockets: true, AllowVSocks: true,
+	}
 
-	decoded, err := DecodeRestrictedExec(append([]string{`{"log_level":"debug"}`}, want.Command...))
+	wire := `{"log_level":"debug","allow_sockets":["/run/allowed.sock"],
+		"allow_all_sockets":true,"allow_vsocks":true}`
+
+	decoded, err := DecodeRestrictedExec(append([]string{wire}, want.Command...))
 	if err != nil || !reflect.DeepEqual(decoded, want) {
 		t.Fatalf("decode restricted exec: error=%v, settings=%#v", err, decoded)
 	}
