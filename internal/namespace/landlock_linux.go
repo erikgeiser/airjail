@@ -78,9 +78,30 @@ func allowUnixSocket(ruleset int, path string) error {
 	return nil
 }
 
+func allowFileReparenting(ruleset int) error {
+	root, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open root for Landlock file reparenting grant: %w", err)
+	}
+	defer func() { _ = unix.Close(root) }()
+
+	attributes := unix.LandlockPathBeneathAttr{
+		Allowed_access: unix.LANDLOCK_ACCESS_FS_REFER,
+		Parent_fd:      int32(root),
+	}
+
+	_, _, errno := unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, uintptr(ruleset),
+		unix.LANDLOCK_RULE_PATH_BENEATH, uintptr(unsafe.Pointer(&attributes)), 0, 0, 0)
+	if errno != 0 {
+		return fmt.Errorf("allow file reparenting through Landlock: %w", errno)
+	}
+
+	return nil
+}
+
 func restrictExternalUnixSockets(socketPaths []string) error {
 	attributes := landlockRulesetAttr{
-		handledAccessFS: landlockAccessFSResolveUnix,
+		handledAccessFS: landlockAccessFSResolveUnix | unix.LANDLOCK_ACCESS_FS_REFER,
 		scoped:          unix.LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET,
 	}
 
@@ -99,6 +120,14 @@ func restrictExternalUnixSockets(socketPaths []string) error {
 
 	fileDescriptor := int(ruleset)
 	defer func() { _ = unix.Close(fileDescriptor) }()
+
+	// REFER is denied even when unhandled. Grant it everywhere so socket
+	// isolation does not also block cross-directory renames and hard links.
+	// https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags
+	err := allowFileReparenting(fileDescriptor)
+	if err != nil {
+		return err
+	}
 
 	for _, path := range socketPaths {
 		err := allowUnixSocket(fileDescriptor, path)

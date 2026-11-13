@@ -155,6 +155,8 @@ func TestExecRestrictedProcess(t *testing.T) {
 		fmt.Fprintf(os.Stderr, "ExecRestricted: %v\n", err)
 		os.Exit(2)
 	case "check":
+		assertFileReparentingAllowed(t)
+
 		if os.Getenv(seccompTestLandlock) == "1" {
 			assertUnixSocketAllowedWithinDomain()
 			assertSocketPairAllowed()
@@ -168,7 +170,8 @@ func TestExecRestrictedProcess(t *testing.T) {
 		assertSocketDenied(unix.AF_VSOCK, unix.SOCK_STREAM)
 		assertIOUringDenied()
 		assertINETSocketAllowed()
-		os.Exit(0)
+
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "unexpected test stage %q\n", os.Getenv(seccompTestStage))
 		os.Exit(2)
