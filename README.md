@@ -3,9 +3,7 @@
   <p align="center"><i>Lightweight, Flexible and Rule-Based Network Isolation</i></p>
   <p align="center">
     <a href="https://github.com/erikgeiser/airjail/releases/latest"><img alt="Release" src="https://img.shields.io/github/release/erikgeiser/airjail.svg?style=for-the-badge"></a>
-    <a href="https://pkg.go.dev/github.com/airjail/airjail"><img alt="Go Doc" src="https://img.shields.io/badge/godoc-reference-blue.svg?style=for-the-badge"></a>
     <a href="https://github.com/erikgeiser/airjail/actions?workflow=Build"><img alt="GitHub Action: Build" src="https://img.shields.io/github/actions/workflow/status/erikgeiser/airjail/build.yml?branch=main&style=for-the-badge"></a>
-    </br>
     <a href="https://github.com/erikgeiser/airjail/actions?workflow=Check"><img alt="GitHub Action: Check" src="https://img.shields.io/github/actions/workflow/status/erikgeiser/airjail/check.yml?branch=main&style=for-the-badge&label=Check"></a>
     <a href="/LICENSE"><img alt="Software License" src="https://img.shields.io/badge/license-MIT-brightgreen.svg?style=for-the-badge"></a>
   </p>
@@ -46,8 +44,8 @@ It follows these design principles:
 
 **Operating Modes:**
 
-It is possible to configure `airjail` on-the-fly with CLI arguments or with a
-YAML config. It can be used in the modes:
+It is possible to configure `airjail` on-the-fly with CLI arguments, a YAML
+config or a mix of both. It can be used in the modes:
 
 - **No network access**: Without `allow` or `block` rules, it blocks all network
   traffic.
@@ -81,39 +79,31 @@ Each rule can reference destinations in multiple ways:
 
 Airjail restricts external Unix domain and vsock sockets by default. While Unix
 sockets are local IPC rather than network access, they can often be used to
-circumvent network restrictions. Vsock can similarly reach host or hypervisor
-services without traversing the network namespace. For example, when SSH is used
-with the `ControlMaster` feature on the host, network isolated processes could
-connect to the `ControlMaster` socket in order to SSH into machines through an
-existing connection that was established outside of the network isolation.
+circumvent network restrictions (e.g. by spawning an out-of-namespace process
+with `systemd-run --user` or establishing a DNS tunnel through the
+`systemd-resolved` socket). On newer kernels, `airjail` allows the jailed
+process to create sockets and connect to them but prevents access to outside
+sockets. However, it is possible to allow access to specific sockets
+(`--allow-socket /path/to/socket`) or disable socket restrictions altogether
+(`--allow-all-sockets`). Older kernels only support wholesale blocking of all
+sockets, both outside and inside of the jail.
 
-On systems with Landlock ABI 9 or newer, airjail denies connections
-to pathname and abstract Unix sockets created outside the sandbox while allowing
-Unix sockets and socket pairs created by the sandboxed process and its
-descendants. Vsock remains unavailable. If this Landlock support is unavailable,
-airjail emits a warning and falls back to denying all Unix and vsock socket
-creation. Use repeatable `--allow-socket /path/to/socket` options to allow
-specific existing pathname Unix sockets. Relative paths are resolved from the
-invocation's working directory, and symlinks are followed. Without suitable
-Landlock support, airjail warns that these exceptions cannot be honored and
-continues denying Unix socket creation.
+Vsock can similarly reach host or hypervisor services without traversing the
+network namespace. Therefore, they are also wholesale blocked by default, which
+can be disabled with `--allow-vsocks`.
 
-`--allow-all-sockets` allows all Unix sockets, including on fallback systems,
-but does not allow vsock. Use `--allow-vsocks` independently to allow vsock.
-These permissions can also be configured with `allow_sockets`,
-`allow_all_sockets`, and `allow_vsocks` in YAML.
-
-Alternatively, `airjail` can be used
-together with `firejail`, `bubblewrap` or a container to remove dangerous
-sockets from the filesystem.
+Alternatively, `airjail` can be used together with `firejail`, `bubblewrap` or a
+container to remove dangerous sockets from the filesystem. This is especially
+useful when jailing a program that internally uses sockets on an old kernel that
+only supports wholesale socket restrictions otherwise.
 
 **Dangerous Capabilities:**
 
-In permission-preserving namespace mode, airjail drops `CAP_SYS_ADMIN`,
-`CAP_NET_ADMIN`, `CAP_SYS_PTRACE`, `CAP_SYS_MODULE`, `CAP_SYS_RAWIO`, `CAP_BPF`,
-`CAP_PERFMON`, and `CAP_CHECKPOINT_RESTORE` from the child and its capability
-bounding set. A capability can be preserved explicitly with a repeatable unsafe
-option:
+When starting `airjail` with administrative capabilities or as `root`, airjail
+drops `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_SYS_PTRACE`, `CAP_SYS_MODULE`,
+`CAP_SYS_RAWIO`, `CAP_BPF`, `CAP_PERFMON`, and `CAP_CHECKPOINT_RESTORE` from the
+child and its capability bounding set. A capability can be preserved explicitly
+with a repeatable unsafe option:
 
 ```sh
 airjail --keep-unsafe-capability CAP_SYS_ADMIN command
@@ -127,7 +117,7 @@ environment. Rootless namespace mode continues to drop all setup capabilities.
 
 If both a config and CLI rules are provided, the CLI rules
 extend (if applicable, e.g. for `allow/block`) or overwrite the config values.
-All arguments after and including the first positional arguments belong to the
+All arguments after and including the first positional argument belong to the
 sandboxed program. Optionally, `airjail` arguments and program arguments can be
 separated with `--` for clarity. The following two invocations are identical:
 
@@ -140,7 +130,7 @@ $ airjail \
 $ airjail --config airjail.yml -- program -flag-a arg-b
 ```
 
-With `airjail.yaml:`
+With `airjail.yaml`:
 
 ```yaml
 allow:
@@ -220,36 +210,48 @@ namespace that only creates a private loopback device. Initially, this prevents
 the program from establishing any incoming or outgoing network traffic. If the
 caller does not have the capabilities `CAP_SYS_ADMIN` and `CAP_NET_ADMIN`,
 creating the network namespace is only possible when combining it with a user
-namespace. If this is the case, the `uid` and `gid` is mapped in order to
+namespace. If this is the case, the `uid` and `gid` are mapped in order to
 preserve user and group permissions, but permissions from supplementary groups
-are lost. If `airjail` is invoked without any configuration, this is all it
-does. However, if rules are present, it creates a SOCKS and an HTTP/HTTPS proxy
-outside of the namespace that each listen on a Unix domain socket and only proxy
-allowed traffic. Inside the namespace, TCP listeners forward proxy-aware traffic
-to those sockets. The HTTP bridge listens on `127.97.105.114:19080` and the
-SOCKS bridge on `127.97.105.114:19081`; both use IPv4. `HTTP_PROXY`,
-`HTTPS_PROXY`, and `GRPC_PROXY` point to HTTP, while `ALL_PROXY` and `FTP_PROXY`
-use remote-resolving SOCKS. Lowercase equivalents are also set. Unless
-transparent fallback is disabled, nftables redirects other TCP connections to a
-transparent listener, which obtains the original destination and connects to it
-through the same policy-enforcing SOCKS server. Proxy environment variables
-continue to let proxy-aware programs provide destination hostnames directly. For
-non-proxy-aware programs, nftables redirects DNS over TCP and UDP to a filtered
-outer resolver. Approved A and AAAA responses temporarily associate their
-addresses with matching hostname rules before transparent TCP connections are
-permitted.
+are lost and other users map to `nobody`.
 
-The supervisor drops child capabilities and starts the child from the same
-locked OS thread, because Linux capability sets and `no_new_privs` are
-thread-local. That thread is retired when its goroutine exits rather than reused
-for other work.
+If `airjail` is invoked without any configuration, this is all it does. However,
+if rules are present, it creates a SOCKS and an HTTP/HTTPS proxy outside of the
+namespace that each listen on a Unix domain socket and only proxy allowed
+traffic. Inside the namespace, TCP listeners forward proxy-aware traffic to
+those sockets. The HTTP bridge listens on `127.97.105.114:19080` and the SOCKS
+bridge on `127.97.105.114:19081`. When spawning the jailed process, `airjail`
+sets all proxy environment variables (e.g. `HTTP_PROXY`, `ALL_PROXY`, ...) that
+are automatically picked up on by most programs.
+
+For all other programs, direct TCP connections are automatically redirected
+through the SOCKS proxy by namespace-scoped `nftables` rules. However, finding
+the original destination is only possible by accepting the connection first.
+Attempting to connect to a blocked host will therefore cause the connection to
+be accepted by `airjail` and closed again, which may confuse some programs. DNS
+lookups are redirected to a simple DNS proxy allowing only `A` and `AAAA`
+lookups to domains that comply with the `allow`/`block` ruleset, preventing DNS
+tunneling to blocked hosts.
 
 Local socket isolation uses Landlock ABI 9 to restrict external Unix sockets,
 with explicit pathname exceptions. Pure-Go seccomp BPF filters deny vsock and,
 when suitable Landlock support is unavailable, Unix socket creation. While
 seccomp socket restrictions are needed, airjail also denies `io_uring_setup`,
-non-native syscall architectures, and the legacy `socketcall` on 386. When no
-socket restriction requires seccomp, these filters are omitted.
+non-native syscall architectures, and the legacy `socketcall` on 386.
+
+## Tips
+
+- **Containers:** By default, containers apply a lot of constraints that prevent
+  processes from creating namespaces. As a result, running `airjail` in a
+  container may require options such as `--security-opt=seccomp=unconfined` or
+  `--security-opt=apparmor=unconfined` depending on your container runtime.
+- **Combining Sandboxes:** Combine `airjail` with other sandboxes such as
+  `firejail`, for example to restrict the process to the current working
+  directory:
+
+```sh
+$ firejail --noprofile --whitelist="$(pwd -P)" --private-tmp \
+    -- airjail --allow example.com -- bash -i
+```
 
 ## Why airjail and not firejail, bubblewrap or sandbox-runtime?
 
@@ -268,15 +270,15 @@ sandboxing.
   but hard for workstations that often switch networks or multiple sandboxed
   process that each need a different IP. DHCP introduces a significant startup
   delay and can exhaust the DHCP pool if many sandboxed processes are started.
-  Also, some network-related option do not support IPv6.
+  Also, some network-related options (e.g. DNS) do not support IPv6.
 - **Access Rules:** Selective network access in `firejail` works by specifying
-  and `iptables` config file which applied to the bridged interface. Having to
+  an `iptables` config file that is applied to the bridged interface. Having to
   create a config file prevents flexible on-the-fly filtering and writing
   `iptables` rules is way harder than specifying destinations with `--allow` or
-  `--deny` and the additional firewall capabilities are rarely need for such
+  `--block` and the additional firewall capabilities are rarely needed for such
   use-cases.
-- **Privileges:** Firejail required `root` access and is therefore packaged as a
-  `suid` binary.
+- **Privileges:** Firejail requires superuser privileges and is therefore
+  packaged as a `suid` binary.
 
 You can profit from all other sandboxing capabilities of `firejail` while
 leaving the network sandboxing to `airjail` by combining both:
@@ -289,15 +291,16 @@ firejail --noprofile --private -- airjail --allow example.com -- bash -i
 
 In contrast to `firejail` and `airjail`, `bubblewrap` does not allow selective
 networking at all. It either allows all traffic or no traffic at all. Therefore,
-it's feature set only slightly overlaps with `airjail`. You can keep using
+its feature set only slightly overlaps with `airjail`. You can keep using
 `bubblewrap` and add selective network filtering by combining it with `airjail`.
 
 **sandbox-runtime:**
 
 Apart from the fact that `sandbox-runtime` also performs filesystem sandboxing,
-the network isolation works similar to `airjail` by using proxy servers through
-Unix domain sockets for outbound raffic. For some use-cases, `airjail`'s network
-isolation may still be desired in order to avoid the following issues:
+the network isolation works similarly to `airjail` by using proxy servers
+through Unix domain sockets for outbound traffic. For some use-cases,
+`airjail`'s network isolation may still be desired in order to avoid the
+following issues:
 
 - **Execution Artifacts:** `sandbox-runtime`'s approach to prevent the creation
   of blocked files that did not exist before causes empty files to be created.
@@ -306,10 +309,10 @@ isolation may still be desired in order to avoid the following issues:
   filesystem rules are configured because `srt` still applies mandatory rules.
   These artifacts are not acceptable for a use-case in which only network
   sandboxing is required.
-- **Dependencies:** `sandbox-runtime` requires `ripgrep`, `fd` to be installed.
+- **Dependencies:** `sandbox-runtime` requires `ripgrep` to be installed.
   Another undocumented dependency is `which` which is not present in many
-  containers. If `which` is not present, `srt` claims that `ripgrep` and `fd`
-  are also not installed even though they are.
+  containers. If `which` is not present, `srt` claims that `ripgrep` is also not
+  installed even though it is.
 - **Mandatory Config File:** `sandbox-runtime` has to be configured with a
   config file and therefore it cannot be used to start network sandboxed
   programs with custom rules on-the-fly.
@@ -317,7 +320,8 @@ isolation may still be desired in order to avoid the following issues:
   `sandbox-runtime` uses a custom loader written in C. When running `srt`, it
   looks for the loader in its `node_modules` and when it is not at the expected
   location (because its build command was not invoked), it silently skips
-  applying `seccomp` rules. This can only be notices with debug logs.
+  applying `seccomp` rules. This can only be noticed with debug logs. It also
+  blocks sockets that are internally created by child processes.
 
 ## Roadmap and Missing Features
 
