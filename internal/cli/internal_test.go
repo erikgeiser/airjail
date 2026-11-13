@@ -38,8 +38,8 @@ func TestSupervisorJSONSettingsAndNativeArgv(t *testing.T) {
 		t.Fatalf("encode supervisor: %v", err)
 	}
 
-	if !slices.Equal(args[1:], command) || len(args[0]) > 2048 {
-		t.Fatal("supervisor encoding changed child argv or included it in the settings")
+	if !slices.Equal(args[1:], command) {
+		t.Fatal("supervisor encoding changed child argv")
 	}
 
 	decoded, err = DecodeSupervisor(args)

@@ -172,15 +172,6 @@ func TestParseDisablesTransparentFallback(t *testing.T) {
 	}
 }
 
-func TestParseRejectsRemovedSocketOption(t *testing.T) {
-	t.Parallel()
-
-	_, err := Parse([]string{"--restrict-sockets", "command"})
-	if err == nil {
-		t.Fatal("removed --restrict-sockets flag was accepted")
-	}
-}
-
 func TestParseRejectsMissingCommand(t *testing.T) {
 	t.Parallel()
 

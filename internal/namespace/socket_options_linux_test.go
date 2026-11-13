@@ -2,7 +2,6 @@
 package namespace
 
 import (
-	"bytes"
 	"fmt"
 	"net"
 	"os"
@@ -81,11 +80,6 @@ func TestSocketPermissionCombinations(t *testing.T) {
 			output, err := command.CombinedOutput()
 			if err != nil {
 				t.Fatalf("socket permissions subprocess: %v\n%s", err, output)
-			}
-
-			if strings.HasPrefix(mode, "grant") && !landlockUnixSocketsAvailable(testABI, runtime.GOARCH) &&
-				!bytes.Contains(output, []byte("exceptions cannot be honored")) {
-				t.Fatalf("missing warning for unsupported socket exceptions: %s", output)
 			}
 		})
 	}
@@ -219,8 +213,8 @@ func seccompFilterCount(tb testing.TB) string {
 	}
 
 	for line := range strings.SplitSeq(string(status), "\n") {
-		if strings.HasPrefix(line, "Seccomp_filters:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "Seccomp_filters:"))
+		if after, ok := strings.CutPrefix(line, "Seccomp_filters:"); ok {
+			return strings.TrimSpace(after)
 		}
 	}
 

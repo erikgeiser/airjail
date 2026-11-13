@@ -34,8 +34,7 @@ func TestHTTPSProxyCertificateVerification(t *testing.T) {
 		}
 
 		if os.Getenv("AIRJAIL_TEST_TLS_FAILURE") == "true" {
-			var certificateError *tls.CertificateVerificationError
-			if !errors.As(err, &certificateError) {
+			if _, ok := errors.AsType[*tls.CertificateVerificationError](err); !ok {
 				t.Fatalf("invalid proxy certificate: got %v, want certificate verification error", err)
 			}
 

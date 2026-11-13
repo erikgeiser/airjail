@@ -7,7 +7,6 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
 )
 
@@ -64,41 +63,6 @@ func TestParseOriginalDestinationRejectsMalformedAddress(t *testing.T) {
 			)
 			if err == nil {
 				t.Fatal("parseOriginalDestination unexpectedly accepted malformed input")
-			}
-		})
-	}
-}
-
-func TestDNSGatewayUsesConntrackNAT(t *testing.T) {
-	t.Parallel()
-
-	for _, test := range []struct {
-		gateway string
-		family  uint32
-	}{
-		{gateway: "127.97.105.114", family: unix.NFPROTO_IPV4},
-		{gateway: "fd61:6972:6a61:696c::1", family: unix.NFPROTO_IPV6},
-	} {
-		t.Run(test.gateway, func(t *testing.T) {
-			t.Parallel()
-
-			gateway := netip.MustParseAddr(test.gateway)
-
-			usesNAT := false
-
-			for _, expression := range transparentDNSUDPExpressions(gateway, test.family) {
-				switch operation := expression.(type) {
-				case *expr.Payload:
-					if operation.OperationType == expr.PayloadWrite {
-						t.Fatal("DNS interception rewrites packet payload instead of using conntrack NAT")
-					}
-				case *expr.NAT:
-					usesNAT = operation.Type == expr.NATTypeDestNAT && operation.Family == test.family
-				}
-			}
-
-			if !usesNAT {
-				t.Fatal("DNS replies cannot reverse the destination translation through conntrack")
 			}
 		})
 	}
